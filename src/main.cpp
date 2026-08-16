@@ -11,6 +11,7 @@
 #include "esp_arduino_version.h"
 
 #include "secrets.h"
+#include "command_safety.h"
 
 #ifndef FIRMWARE_GIT_REV
 #define FIRMWARE_GIT_REV "unknown"
@@ -169,6 +170,7 @@ constexpr uint8_t COMMAND_QUEUE_SIZE = 8;
 
 struct PendingCommand {
   bool fromHA = false;
+  uint32_t stopEpoch = 0;
   String payload;
 };
 
@@ -177,6 +179,15 @@ PendingCommand commandQueue[COMMAND_QUEUE_SIZE];
 uint8_t commandQueueHead = 0;
 uint8_t commandQueueTail = 0;
 uint8_t commandQueueCount = 0;
+
+// Katrs urgent STOP/OFF palielina epoch. Parastās komandas saglabā
+// epoch, kurā tās tika saņemtas, lai pēc jaunāka STOP varētu
+// atmest tikai stale pump-start/extend komandas, nezaudējot statusa
+// vai diagnostikas komandas.
+uint32_t pumpStopEpoch = 0;
+
+bool urgentPumpStopPending = false;
+bool urgentPumpStopFromHA = false;
 
 // ============================================================
 // TELEGRAM IZEJOŠO ZIŅU RINDA
@@ -551,6 +562,13 @@ void publishPumpStatus() {
 
 bool startPump(uint32_t seconds) {
 
+  // Ja STOP/OFF tikko saņemts, vispirms jāpabeidz tā stāvokļa
+  // reconciliācija. Tas nepieļauj pump startu vienā un tajā pašā
+  // loop logā pirms urgent stop apstrādes.
+  if (urgentPumpStopPending) {
+    return false;
+  }
+
   if (pumpRunning) {
     return false;
   }
@@ -729,6 +747,77 @@ void servicePump() {
       "plānotais laiks beidzies"
     );
   }
+}
+
+// ============================================================
+// URGENT SŪKŅA STOP/OFF
+// ============================================================
+
+void requestUrgentPumpStop(bool fromHA) {
+
+  // Drošības efekts notiek uzreiz callback kontekstā: tikai GPIO OFF.
+  // MQTT publish/logging šeit apzināti neveicam, lai neizraisītu
+  // PubSubClient re-entrancy.
+  digitalWrite(
+    RELAY_PIN,
+    RELAY_OFF
+  );
+
+  pumpStopEpoch++;
+  urgentPumpStopPending = true;
+  urgentPumpStopFromHA = fromHA;
+}
+
+void serviceUrgentPumpStop() {
+
+  if (!urgentPumpStopPending) {
+    return;
+  }
+
+  bool fromHA = urgentPumpStopFromHA;
+
+  urgentPumpStopPending = false;
+  urgentPumpStopFromHA = false;
+
+  if (pumpRunning) {
+
+    stopPump(
+      fromHA ?
+      "Home Assistant OFF (urgent)" :
+      "manuāla STOP komanda (urgent)"
+    );
+
+    return;
+  }
+
+  // Pat ja programmatūras stāvoklis jau bija OFF, uzturam fizisko
+  // fail-safe stāvokli un atjaunojam retained MQTT statusu.
+  digitalWrite(
+    RELAY_PIN,
+    RELAY_OFF
+  );
+
+  publishPumpStatus();
+
+  if (!fromHA) {
+    tgSend(
+      "Sūknis jau bija izslēgts."
+    );
+  }
+}
+
+// Garāku sensoru lasījumu laikā pieņemam MQTT inputu, bet
+// neuzsākam reconnect. Tas ļauj saņemt STOP/OFF starp sensoriem
+// un tūlīt pēc mqtt.loop() atgriešanās pabeigt stop reconciliāciju.
+void servicePumpCriticalNetworkInput() {
+
+  if (mqtt.connected()) {
+    mqtt.loop();
+  }
+
+  serviceUrgentPumpStop();
+  servicePump();
+  feedWatchdog();
 }
 
 // ============================================================
@@ -1109,9 +1198,8 @@ void enqueueCommand(
   const String& payload
 ) {
 
-  // Ja rinda pilna, izmetam vecāko komandu.
-  // Tas dod priekšroku jaunākajām komandām,
-  // piemēram STOP.
+  // Ja rinda pilna, izmetam vecāko PARASTO komandu.
+  // STOP/OFF šo FIFO vispār neizmanto.
   if (
       commandQueueCount >=
       COMMAND_QUEUE_SIZE
@@ -1139,6 +1227,10 @@ void enqueueCommand(
 
   commandQueue[
     commandQueueTail
+  ].stopEpoch = pumpStopEpoch;
+
+  commandQueue[
+    commandQueueTail
   ].payload = payload;
 
   commandQueueTail =
@@ -1162,6 +1254,11 @@ bool dequeueCommand(
       commandQueue[
         commandQueueHead
       ].fromHA;
+
+  out.stopEpoch =
+      commandQueue[
+        commandQueueHead
+      ].stopEpoch;
 
   out.payload =
       commandQueue[
@@ -1306,30 +1403,53 @@ void mqttCallback(
         );
   }
 
+  message.trim();
+
   String topicString(
     topic
   );
+
+  bool fromHA = false;
+  bool recognizedTopic = false;
 
   if (
       topicString ==
       T_PUMP_CMD
   ) {
 
-    enqueueCommand(
-      true,
-      message
-    );
+    fromHA = true;
+    recognizedTopic = true;
 
   } else if (
       topicString ==
       T_CMD
   ) {
 
-    enqueueCommand(
-      false,
-      message
-    );
+    recognizedTopic = true;
   }
+
+  if (!recognizedTopic) {
+    return;
+  }
+
+  if (
+      command_safety::isUrgentStop(
+        fromHA,
+        message.c_str()
+      )
+  ) {
+
+    requestUrgentPumpStop(
+      fromHA
+    );
+
+    return;
+  }
+
+  enqueueCommand(
+    fromHA,
+    message
+  );
 }
 
 void handleDeferredSystemLogs() {
@@ -1544,7 +1664,7 @@ void publishMoisture() {
           sensor
         );
 
-    feedWatchdog();
+    servicePumpCriticalNetworkInput();
 
     String category =
         categorizeMoisture(
@@ -1799,9 +1919,7 @@ void processCommand(
             sensor
           );
 
-      feedWatchdog();
-
-      servicePump();
+      servicePumpCriticalNetworkInput();
 
       String category =
           categorizeMoisture(
@@ -1899,9 +2017,7 @@ void processCommand(
           sum /
           10;
 
-      feedWatchdog();
-
-      servicePump();
+      servicePumpCriticalNetworkInput();
 
       result +=
           "Puķe " +
@@ -2124,6 +2240,22 @@ void processCommandQueue() {
     return;
   }
 
+  if (
+      command_safety::shouldSuppressQueuedPumpStart(
+        item.stopEpoch,
+        pumpStopEpoch,
+        item.fromHA,
+        item.payload.c_str()
+      )
+  ) {
+
+    logEvent(
+      "Drošība: stale pump-start komanda atmesta pēc jaunāka STOP/OFF"
+    );
+
+    return;
+  }
+
   if (item.fromHA) {
 
     processHACommand(
@@ -2283,6 +2415,10 @@ void loop() {
 
   feedWatchdog();
 
+  // Ja urgent STOP palicis no iepriekšējā tīkla callback,
+  // tas vienmēr dominē pirms jebkura cita loop darba.
+  serviceUrgentPumpStop();
+
   // Sūkņa drošību pārbaudām pašā loop sākumā.
   servicePump();
 
@@ -2310,6 +2446,11 @@ void loop() {
   // ----------------------------------------------------------
 
   serviceMQTT();
+
+  // mqtt.loop() varēja pieņemt urgent STOP/OFF. Relejs callbackā
+  // jau tika fiziski izslēgts; šeit nekavējoties sakārtojam state,
+  // statistiku, logus un retained statusu pirms parastās FIFO.
+  serviceUrgentPumpStop();
 
   // Pēc iespējami bloķējoša tīkla mēģinājuma
   // vēlreiz pārbaudām sūkņa laiku.
