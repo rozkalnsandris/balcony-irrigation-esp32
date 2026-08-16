@@ -24,7 +24,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install PlatformIO
-        run: python -m pip install --disable-pip-version-check platformio
+        run: python -m pip install --disable-pip-version-check 'platformio==6.1.19'
 
       - name: Create non-secret CI configuration
         run: cp include/secrets.example.h include/secrets.h
