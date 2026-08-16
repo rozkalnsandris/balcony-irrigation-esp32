@@ -18,7 +18,7 @@ Import("env")
 if env.IsIntegrationDump():
     Return()
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(env.subst("$PROJECT_DIR")).resolve()
 
 
 def git_output(*args: str) -> str:
