@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Emit a PlatformIO build flag with the current Git revision.
+"""Inject the current Git revision into the PlatformIO build environment.
+
+This file is loaded by PlatformIO as a PRE extra script, so it runs inside
+PlatformIO's own Python interpreter and does not depend on a host shell
+command named `python`.
 
 Ignored files (for example include/secrets.h and .pio/) do not make the
 revision dirty. Tracked modifications and non-ignored untracked files do.
@@ -8,6 +12,11 @@ revision dirty. Tracked modifications and non-ignored untracked files do.
 from pathlib import Path
 import subprocess
 import sys
+
+Import("env")
+
+if env.IsIntegrationDump():
+    Return()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +40,8 @@ except (subprocess.CalledProcessError, FileNotFoundError) as exc:
 if dirty:
     revision += "-dirty"
 
-# Match PlatformIO's documented dynamic-build-flags quoting pattern so the
-# macro value reaches the C/C++ compiler as a string literal.
-print(f"'-DFIRMWARE_GIT_REV=\"{revision}\"'")
+env.Append(
+    CPPDEFINES=[
+        ("FIRMWARE_GIT_REV", env.StringifyMacro(revision)),
+    ]
+)
