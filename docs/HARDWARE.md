@@ -43,6 +43,8 @@ Koriģētajā materiālā vienlaikus bija “VERIFY REAL HARDWARE”, tāpēc do
 - `NO` = pareizais projekta dizains;
 - exact pašreizējais `COM/NO/NC` spaiļu vadojums vēl jānofotografē/nostiprina kā fizisks pierādījums, īpaši pēc jebkādas pārlikšanas.
 
+Pašreizējās montāžas foto/evidence pārbaude jāveic pēc [`PHYSICAL_WIRING_VERIFICATION.md`](PHYSICAL_WIRING_VERIFICATION.md). Šis checklist ir inspection-only un pats par sevi neautorizē sūkņa ieslēgšanu.
+
 ## Back-EMF / motora trokšņu vēsture
 
 Agrāk ESP32 restartējās tieši sūkņa **izslēgšanas** brīdī. Vēsturiskā diagnostika sasaistīja to ar DC motora induktīvo kickback/back-EMF un barošanas traucējumiem.
