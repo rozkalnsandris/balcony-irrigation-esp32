@@ -31,6 +31,9 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --disable-pip-version-check 'platformio==6.1.19'
 
+      - name: Run native command-safety tests
+        run: pio test -e native
+
       - name: Create non-secret CI configuration
         run: cp include/secrets.example.h include/secrets.h
 
