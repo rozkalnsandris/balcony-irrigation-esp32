@@ -30,6 +30,7 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 ├── docs/MQTT_HOME_ASSISTANT.md
 ├── docs/SAFETY.md
 ├── docs/PROJECT_HISTORY.md
+├── docs/SOURCE_BASELINE.md
 └── docs/AUDIT_2026-08-16.md
 ```
 
@@ -43,16 +44,22 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 pio run
 ```
 
-4. Tikai pirms apzināta OTA upload iestati paroli vides mainīgajā:
+4. Tikai pirms apzināta OTA upload nodod uploaderim paroli caur PlatformIO oficiālo vides mainīgo:
 
 ```bash
-export BALKONS_OTA_PASSWORD='...'
+export PLATFORMIO_UPLOAD_FLAGS='--auth=YOUR_OTA_PASSWORD'
 ```
 
 5. OTA upload (tikai tad, kad apzināti vēlies mainīt dzīvo ESP32):
 
 ```bash
 pio run -e esp32_ota -t upload
+```
+
+Pēc upload noņem slepeno mainīgo no shell sesijas:
+
+```bash
+unset PLATFORMIO_UPLOAD_FLAGS
 ```
 
 OTA mērķis ir `balkons-esp32.local`, kas atbilst firmware hostname; nav jāuztur cieti iešūta DHCP IP adrese.
