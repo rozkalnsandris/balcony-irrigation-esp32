@@ -21,6 +21,7 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 - Home Assistant sensoru un sūkņa switch auto-discovery.
 - Telegram ziņas tiek izvadītas caur MQTT uz RPi5 pusi.
 - ArduinoOTA ar paroles aizsardzību.
+- PlatformIO build iebūvē pilno Git revīziju; `/statuss` un startup logs to rāda nākamā deploy verifikācijai.
 - Watchdog un Wi-Fi/MQTT reconnect loģika.
 - Sūknim ir lokāls, no ārējiem servisiem neatkarīgs **180 sekunžu hard limit**.
 - Boot un OTA sākumā relejs tiek piespiests OFF.
@@ -32,11 +33,13 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 ├── src/main.cpp                         # ESP32 firmware
 ├── include/secrets.example.h            # tikai piemērs; īstais secrets.h netiek commitots
 ├── platformio.ini                       # build-only CI + atsevišķa OTA vide
+├── scripts/git_rev_macro.py             # build-time exact Git revision
 ├── .github/workflows/firmware-ci.yml    # build-only GitHub Actions CI
 ├── docs/ARCHITECTURE.md
 ├── docs/HARDWARE.md
 ├── docs/MQTT_HOME_ASSISTANT.md
 ├── docs/SAFETY.md
+├── docs/FIRMWARE_IDENTITY.md
 ├── docs/PROJECT_HISTORY.md
 ├── docs/HISTORICAL_KNOWLEDGE_BASE.md    # sanitizētā Claude-era projekta atmiņa
 ├── docs/SOURCE_BASELINE.md
@@ -72,6 +75,8 @@ unset PLATFORMIO_UPLOAD_FLAGS
 ```
 
 OTA mērķis ir `balkons-esp32.local`, kas atbilst firmware hostname; nav jāuztur cieti iešūta DHCP IP adrese OTA konfigurācijā.
+
+Pēc nākamā OTA `/statuss` laukam `Firmware:` precīzi jāsakrīt ar autorizēto `git rev-parse HEAD`; pilnais verifikācijas kontrakts ir [`docs/FIRMWARE_IDENTITY.md`](docs/FIRMWARE_IDENTITY.md).
 
 ## Svarīga robeža
 

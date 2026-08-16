@@ -12,6 +12,10 @@
 
 #include "secrets.h"
 
+#ifndef FIRMWARE_GIT_REV
+#define FIRMWARE_GIT_REV "unknown"
+#endif
+
 // Palielina Arduino loop() task steku.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
@@ -1343,7 +1347,8 @@ void handleDeferredSystemLogs() {
         ESP.getFreeHeap() /
         1024
       ) +
-      " KB"
+      " KB, firmware: " +
+      String(FIRMWARE_GIT_REV)
     );
 
     if (pumpWasRunningAtBoot) {
@@ -1928,7 +1933,7 @@ void processCommand(
         "⚙️ Statuss:\n";
 
     status.reserve(
-      400
+      480
     );
 
     status +=
@@ -2018,6 +2023,11 @@ void processCommand(
     status +=
         "Laiks: " +
         getTimeString() +
+        "\n";
+
+    status +=
+        "Firmware: " +
+        String(FIRMWARE_GIT_REV) +
         "\n";
 
     status +=
