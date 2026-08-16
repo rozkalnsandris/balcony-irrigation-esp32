@@ -1,0 +1,28 @@
+.pio/
+.vscode/
+
+# Secrets / local environment
+include/secrets.h
+.env
+.env.*
+!.env.example
+
+# Local logs and generated firmware/debug files
+*.log
+*.bin
+*.elf
+*.map
+*.dump
+*.bak
+*.backup
+.DS_Store
+
+# Local source/flash archives may contain secrets or compiled firmware
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Never commit private AI/chat exports
+claude-export/
+FULL_PRIVATE/
