@@ -31,6 +31,6 @@ except (subprocess.CalledProcessError, FileNotFoundError) as exc:
 if dirty:
     revision += "-dirty"
 
-# PlatformIO parses the printed line as build_flags. The escaped quotes make
-# FIRMWARE_GIT_REV a C/C++ string literal.
-print(f"'-DFIRMWARE_GIT_REV=\\\"{revision}\\\"'")
+# Match PlatformIO's documented dynamic-build-flags quoting pattern so the
+# macro value reaches the C/C++ compiler as a string literal.
+print(f"'-DFIRMWARE_GIT_REV=\"{revision}\"'")
