@@ -1,0 +1,157 @@
+from pathlib import Path
+
+
+path = Path("src/main.cpp")
+text = path.read_text()
+
+if "MQTT_TCP_CONNECT_TIMEOUT_MS = 1000UL" in text:
+    print("Phase 2 main.cpp patch already applied; nothing to do.")
+    raise SystemExit(0)
+
+
+def replace_once(old: str, new: str, label: str) -> None:
+    global text
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(
+            f"{label}: expected exactly one baseline match, found {count}"
+        )
+    text = text.replace(old, new, 1)
+
+
+replace_once(
+    '#include "secrets.h"\n#include "command_safety.h"\n',
+    '#include "secrets.h"\n'
+    '#include "command_safety.h"\n'
+    '#include "network_reconnect_policy.h"\n',
+    "include guard",
+)
+
+replace_once(
+    'constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000UL;\n'
+    'constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 60000UL;\n\n'
+    'constexpr uint16_t MQTT_KEEPALIVE_S = 30;\n',
+    'constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000UL;\n'
+    'constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 60000UL;\n'
+    'constexpr uint32_t MQTT_TCP_CONNECT_TIMEOUT_MS = 1000UL;\n\n'
+    'constexpr uint16_t MQTT_KEEPALIVE_S = 30;\n',
+    "timeout constants",
+)
+
+old_service = """void serviceMQTT() {
+
+  if (
+      WiFi.status() !=
+      WL_CONNECTED
+  ) {
+    return;
+  }
+
+  if (
+      mqtt.connected()
+  ) {
+
+    mqtt.loop();
+
+    return;
+  }
+
+  uint32_t now =
+      millis();
+
+  if (
+      now -
+      lastMqttReconnectAttempt >=
+      MQTT_RECONNECT_INTERVAL_MS
+  ) {
+
+    lastMqttReconnectAttempt =
+        now;
+
+    connectMQTT();
+  }
+}
+"""
+
+new_service = """void serviceMQTT() {
+
+  bool wifiConnected =
+      WiFi.status() ==
+      WL_CONNECTED;
+
+  bool mqttConnected =
+      mqtt.connected();
+
+  if (!wifiConnected) {
+    return;
+  }
+
+  if (mqttConnected) {
+
+    mqtt.loop();
+
+    return;
+  }
+
+  uint32_t now =
+      millis();
+
+  // Ja sūknis darbojas, jaunu TCP/MQTT reconnect nemaz nesākam.
+  // Esošu veselīgu MQTT sesiju turpinām apkalpot augstāk ar mqtt.loop(),
+  // lai urgent STOP/OFF joprojām var pienākt nekavējoties.
+  if (
+      !network_policy::shouldAttemptMqttReconnect(
+        wifiConnected,
+        mqttConnected,
+        pumpRunning,
+        now,
+        lastMqttReconnectAttempt,
+        MQTT_RECONNECT_INTERVAL_MS
+      )
+  ) {
+    return;
+  }
+
+  lastMqttReconnectAttempt =
+      now;
+
+  // Reconnect notiek tikai ar sūkni OFF. TCP connect ir 1 s limits;
+  // PubSubClient MQTT atbildes logs paliek 2 s, tātad viena OFF-state
+  // reconnect mēģinājuma nominālā augšējā robeža ir ~3 s plus neliels
+  // scheduler/tīkla overhead. Pump-running laikā šis ceļš netiek sākts.
+  connectMQTT();
+}
+"""
+
+replace_once(old_service, new_service, "serviceMQTT")
+
+replace_once(
+    """  // ----------------------------------------------------------
+  // MQTT
+  // ----------------------------------------------------------
+
+  mqtt.setServer(
+    MQTT_SERVER,
+    MQTT_PORT
+  );
+""",
+    """  // ----------------------------------------------------------
+  // MQTT
+  // ----------------------------------------------------------
+
+  // Arduino-ESP32 NetworkClient noklusējums ir 3000 ms.
+  // Mūsu lokālajam brokerim to skaidri ierobežojam līdz 1000 ms.
+  mqttNet.setConnectionTimeout(
+    MQTT_TCP_CONNECT_TIMEOUT_MS
+  );
+
+  mqtt.setServer(
+    MQTT_SERVER,
+    MQTT_PORT
+  );
+""",
+    "MQTT setup",
+)
+
+path.write_text(text)
+print("Phase 2 source patch applied to src/main.cpp")
