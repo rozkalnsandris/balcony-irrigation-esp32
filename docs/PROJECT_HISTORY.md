@@ -104,7 +104,7 @@ Atsevišķos vēsturiskos testos:
 
 Tie nav pašreizējā sensora stāvokļa pierādījumi.
 
-## 2026-08-16 — GitHub bootstrap un production OTA
+## 2026-08-16 — GitHub bootstrap un pirmais production OTA
 
 Vecais Lenovo PlatformIO source tika salīdzināts ar importēto baseline; `src/main.cpp` SHA-256 sakrita 1:1 ar dokumentēto sākuma avotu.
 
@@ -119,15 +119,36 @@ Publiskais repo tika uzbūvēts ar:
 
 Bootstrap auditā tika salabota timezone inicializācija uz `configTzTime(...)`.
 
-PR #1 tika squash-merged. Exact production `main`:
+PR #1 tika squash-merged. Pirmais verified production `main` bija:
 
 `599abfac74b0b30fdc03e3076fda7630353812c0`
 
 Exact-main CI bija SUCCESS. Pēc explicit owner OTA autorizācijas firmware tika uzlikts pa Wi-Fi. Post-OTA `/statuss` apstiprināja svaigu uptime, pareizu Europe/Berlin laiku, Wi-Fi/MQTT ONLINE un sūkni OFF.
 
+## 2026-08-16 — runtime firmware identity un otrais verified OTA
+
+Pēc pirmā deploy tika pievienota build-time Git revīzija, lai `/statuss` varētu tieši pierādīt, kurš exact source commit darbojas uz ESP32.
+
+Pirmais mēģinājums uz `0687e69665d7a7ca5af1ae966e75d1e3d7ffc413` apstājās droši pirms firmware transfer, jo dynamic build hook izmantoja host shell `python`, kura Lenovo nebija. PR #8 pārcēla revision injection uz PlatformIO PRE `extra_scripts` vidi un novērsa host `python` alias dependency.
+
+PR #8 tika squash-merged. Pašreizējais verified production `main` ir:
+
+`e34a3e02a290d5022db6d41452f4d81a6575aac6`
+
+Exact-main `firmware-ci` #19 / run `31972773249` bija SUCCESS. Pēc fresh explicit owner autorizācijas authenticated OTA #6 pabeidzās ar `esp32_ota SUCCESS` un `OTA_RC=0`. ESP32 atgriezās online, un Telegram `/statuss` uzrādīja:
+
+- exact `Firmware: e34a3e02a290d5022db6d41452f4d81a6575aac6`;
+- MQTT connected;
+- pump OFF;
+- Wi-Fi `192.168.0.53`;
+- fresh `Uptime: 0 min`;
+- korektu Europe/Berlin laiku.
+
+Tādējādi exact runtime firmware identitāte pirmo reizi tika tieši sasaistīta 1:1 ar current `main`. Issue #6 tika aizvērts kā completed.
+
 ## Pašreizējie neatrisinātie punkti
 
-- nofotografēt exact releja `COM/NO/NC` fizisko vadojumu;
+- nofotografēt exact releja `COM/NO/NC` fizisko vadojumu pēc [`PHYSICAL_WIRING_VERIFICATION.md`](PHYSICAL_WIRING_VERIFICATION.md);
 - pēc jebkādas montāžas pārlikšanas nofotografēt `1N5408 + 100nF + 470µF` faktisko izvietojumu/polaritāti;
 - svaigi pārbaudīt sensoru veselību;
 - gala montāžā pabeigt GPIO12 → GPIO25 MUX S1 pārcelšanu;
