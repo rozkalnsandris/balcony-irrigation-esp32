@@ -24,7 +24,7 @@ Lietotājvārds un parole ir tikai `include/secrets.h` un netiek glabāti Git.
 
 ESP32 publicē 15 sensorus un vienu sūkņa switch zem `homeassistant/.../config`. Ierīces identitāte: `balkons_esp32`, nosaukums “Balkona Laistīšana”.
 
-Discovery payloadi ir retained; availability tiek publicēta `balkons/status`, ieskaitot MQTT Last Will `offline`. Home Assistant dokumentācija atbalsta gan retained discovery, gan availability topic modeli.
+Discovery payloadi ir retained; availability tiek publicēta `balkons/status`, ieskaitot MQTT Last Will `offline`.
 
 Svarīga semantika: HA `ON` pašreizējā firmware sāk sūkni ar firmware maksimālo limitu (180 s), nevis ar 30 s noklusējumu. Lokālais hard-limit tik un tā izslēdz sūkni. Šī uzvedība bootstrap auditā nav klusām mainīta.
 
@@ -37,3 +37,25 @@ Svarīga semantika: HA `ON` pašreizējā firmware sāk sūkni ar firmware maksi
 - `raw` — RAW ADC pārskats;
 - `statuss` — sūkņa/Wi-Fi/MQTT/heap/laika/uptime statuss;
 - `statistika` — laistīšanas statistika kopš boot.
+
+## Telegram bridge vēsturiskais kontrakts
+
+Telegram TLS tika pārvietots no ESP32 uz RPi5. ESP32 publicē izejošās ziņas uz `balkons/telegram_out` un saņem teksta komandas caur `balkons/cmd`.
+
+Claude-era RPi5 auditā bija redzami `balkons-bot.service` un `balkons-log.service`; citā incidenta logā `balkons-bot.service` atkārtoti krita. Tas ir iemesls, kāpēc sūkņa lokālais taimeris nedrīkst būt atkarīgs no Telegram bridge veselības.
+
+Aktuālais RPi5 source vēl jāpaņem no dzīva hosta un jāsanitizē pirms commit.
+
+## Vēsturiskais `laistisana.sh` un HA vadības incidents
+
+Atgūtajā vēsturē `laistisana.sh` izmantoja Home Assistant REST API ar retry, kontrolētu gaidīšanas laiku un shell `trap` OFF drošības tīklu. Ir atgūts reāls 60 s ON → OFF izpildījums ar Telegram paziņojumu.
+
+Tajā pašā vēstures periodā Hermes `ha_call_service` dažkārt varēja atgriezt `success`, lai gan komanda līdz ESP32 nebija nonākusi. Tāpēc toreiz priekšroka tika dota tiešajam skriptam ar REST/retry.
+
+Tas ir **historical behavior**, nevis current RPi5 source guarantee. Pašreizējo skriptu nedrīkst rekonstruēt tikai no čata; tas jānolasa no RPi5.
+
+## Vēsturiskais 30 s auto-OFF incidents
+
+Vecākā firmware/automatizācijas stadijā tika fiksēti testi, kuros pēc 40–45 s pumpis joprojām bija ON. Šis incidents ir superseded ar current firmware lokālo pump session timer un 180 s hard-limit. Vecajos materiālos sastopamais 600 s limits arī ir superseded.
+
+Plašāka recovered vēsture un conflict tabula: [`HISTORICAL_KNOWLEDGE_BASE.md`](HISTORICAL_KNOWLEDGE_BASE.md).
