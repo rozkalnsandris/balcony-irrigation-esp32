@@ -19,6 +19,8 @@ Pareizais projekta dizains ir releja **NO (Normally Open)** kontakts sūkņa str
 
 Vecā vēstures draftā bija kļūdains `NC` apgalvojums; tas ir superseded. Koriģētajā vēstures materiālā NO ir skaidri noteikts kā pareizais variants, taču exact pašreizējās fiziskās spailes vēl ir vērts vienreiz nofotografēt un dokumentēt.
 
+Šīs fiziskās pārbaudes noteikumi ir [`PHYSICAL_WIRING_VERIFICATION.md`](PHYSICAL_WIRING_VERIFICATION.md): inspection-only, pump OFF, bez vadu pārspraušanas zem sprieguma un bez automātiskas atļaujas dzīvajam sūkņa testam.
+
 ## Back-EMF aizsardzības statuss
 
 Back-EMF vairs nav korekti saukt par “nekad neatrisinātu”. Claude-era vēsturē ir atgūts:
@@ -61,5 +63,7 @@ Vēsturiskais `laistisana.sh` izmantoja HA REST API retry un shell `trap` OFF k�
 - nofotografēt pašreizējo `1N5408` polaritāti un `100nF + 470µF` izvietojumu;
 - ja wiring ir mainīts kopš historical PASS, atkārtot tikai īsu kontrolētu testu;
 - MUX S1 atstāt GPIO12 firmware līdz fiziska pārlikšana uz GPIO25 tiešām ir veikta.
+
+Fiziskā evidence checklist: [`PHYSICAL_WIRING_VERIFICATION.md`](PHYSICAL_WIRING_VERIFICATION.md).
 
 Pilna recovered provenance: [`HISTORICAL_KNOWLEDGE_BASE.md`](HISTORICAL_KNOWLEDGE_BASE.md).
