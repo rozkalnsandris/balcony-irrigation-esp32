@@ -6,11 +6,13 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 
 ## Pašreizējais production baseline
 
-- exact production `main`: `599abfac74b0b30fdc03e3076fda7630353812c0`;
-- exact-main `firmware-ci`: SUCCESS;
-- 2026-08-16 authenticated ArduinoOTA deploy: SUCCESS;
-- post-OTA ESP32: Wi-Fi ONLINE, MQTT ONLINE, CET/CEST laiks korekts, sūknis OFF;
+- exact production `main`: `e34a3e02a290d5022db6d41452f4d81a6575aac6`;
+- exact-main `firmware-ci` #19 / run `31972773249`: SUCCESS;
+- 2026-08-16 authenticated ArduinoOTA deploy #6: SUCCESS / `OTA_RC=0`;
+- post-OTA `/statuss`: exact `Firmware: e34a3e02a290d5022db6d41452f4d81a6575aac6`, Wi-Fi ONLINE, MQTT ONLINE, Europe/Berlin laiks korekts, sūknis OFF, svaigs uptime;
 - OTA hostname: `balkons-esp32.local`.
+
+Iepriekšējais `599abfac74b0b30fdc03e3076fda7630353812c0` bija pirmais veiksmīgi verificētais bootstrap OTA baseline un paliek projekta vēsturē, bet vairs nav pašreizējais production SHA.
 
 ## Pašreizējais firmware
 
@@ -21,7 +23,7 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 - Home Assistant sensoru un sūkņa switch auto-discovery.
 - Telegram ziņas tiek izvadītas caur MQTT uz RPi5 pusi.
 - ArduinoOTA ar paroles aizsardzību.
-- PlatformIO build iebūvē pilno Git revīziju; `/statuss` un startup logs to rāda nākamā deploy verifikācijai.
+- PlatformIO build iebūvē pilno Git revīziju; `/statuss` un startup logs rāda exact runtime firmware identitāti.
 - Watchdog un Wi-Fi/MQTT reconnect loģika.
 - Sūknim ir lokāls, no ārējiem servisiem neatkarīgs **180 sekunžu hard limit**.
 - Boot un OTA sākumā relejs tiek piespiests OFF.
@@ -40,6 +42,7 @@ Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto E
 ├── docs/MQTT_HOME_ASSISTANT.md
 ├── docs/SAFETY.md
 ├── docs/FIRMWARE_IDENTITY.md
+├── docs/PHYSICAL_WIRING_VERIFICATION.md # pump-OFF fiziskās montāžas evidence checklist
 ├── docs/PROJECT_HISTORY.md
 ├── docs/HISTORICAL_KNOWLEDGE_BASE.md    # sanitizētā Claude-era projekta atmiņa
 ├── docs/SOURCE_BASELINE.md
@@ -76,7 +79,7 @@ unset PLATFORMIO_UPLOAD_FLAGS
 
 OTA mērķis ir `balkons-esp32.local`, kas atbilst firmware hostname; nav jāuztur cieti iešūta DHCP IP adrese OTA konfigurācijā.
 
-Pēc nākamā OTA `/statuss` laukam `Firmware:` precīzi jāsakrīt ar autorizēto `git rev-parse HEAD`; pilnais verifikācijas kontrakts ir [`docs/FIRMWARE_IDENTITY.md`](docs/FIRMWARE_IDENTITY.md).
+Pēc jebkura explicit owner autorizēta OTA `/statuss` laukam `Firmware:` precīzi jāsakrīt ar autorizēto `git rev-parse HEAD`; pilnais verifikācijas kontrakts ir [`docs/FIRMWARE_IDENTITY.md`](docs/FIRMWARE_IDENTITY.md).
 
 ## Svarīga robeža
 
@@ -84,7 +87,7 @@ Pēc nākamā OTA `/statuss` laukam `Firmware:` precīzi jāsakrīt ar autorizē
 
 ## Aktuālie TODO
 
-- [ ] Vienreiz nofotografēt/nostiprināt faktiskās releja `COM/NO/NC` spailes. Vēstures koriģētais fail-safe dizains ir **NO**, bet precīzo pašreizējo termināļu stāvokli glabājam kā fiziski pārbaudāmu faktu.
+- [ ] Vienreiz nofotografēt/nostiprināt faktiskās releja `COM/NO/NC` spailes pēc [`docs/PHYSICAL_WIRING_VERIFICATION.md`](docs/PHYSICAL_WIRING_VERIFICATION.md). Vēstures koriģētais fail-safe dizains ir **NO**, bet precīzo pašreizējo termināļu stāvokli glabājam kā fiziski pārbaudāmu faktu.
 - [x] Claude-era vēsturē atgūts pierādījums, ka tika uzlikts `1N5408 + 100nF + 470µF` back-EMF/decoupling komplekts.
 - [x] Claude-era vēsturē atgūts vismaz viens ~15 s post-fix sūkņa tests, kur ESP32 nepazuda un sūknis korekti atgriezās OFF.
 - [ ] Pēc jebkādas jaunākas aparatūras pārlikšanas nofotografēt pašreizējo diodes polaritāti/kondensatoru izvietojumu; atkārtot īsu sūkņa testu tikai ar owner autorizāciju.
