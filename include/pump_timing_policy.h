@@ -53,13 +53,11 @@ inline std::uint32_t elapsedMs(
   return static_cast<std::uint32_t>(now - sessionStartMs);
 }
 
-inline bool shouldStopForElapsedTime(
+inline bool hasElapsed(
     std::uint32_t now,
     std::uint32_t sessionStartMs,
-    std::uint32_t plannedDurationMs,
-    std::uint32_t hardLimitMs) {
-  const std::uint32_t elapsed = elapsedMs(now, sessionStartMs);
-  return elapsed >= plannedDurationMs || elapsed >= hardLimitMs;
+    std::uint32_t durationMs) {
+  return elapsedMs(now, sessionStartMs) >= durationMs;
 }
 
 }  // namespace pump_timing_policy
