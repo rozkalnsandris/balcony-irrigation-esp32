@@ -14,6 +14,7 @@
 #include "command_safety.h"
 #include "command_payload_policy.h"
 #include "network_reconnect_policy.h"
+#include "pump_timing_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
 #define FIRMWARE_GIT_REV "unknown"
@@ -578,13 +579,12 @@ bool startPump(uint32_t seconds) {
     return false;
   }
 
-  if (seconds == 0) {
-    seconds = DEFAULT_PUMP_SECONDS;
-  }
-
-  if (seconds > MAX_PUMP_SECONDS) {
-    seconds = MAX_PUMP_SECONDS;
-  }
+  seconds =
+      pump_timing_policy::normalizeRequestedSeconds(
+        seconds,
+        DEFAULT_PUMP_SECONDS,
+        MAX_PUMP_SECONDS
+      );
 
   uint32_t now = millis();
 
@@ -630,37 +630,18 @@ uint32_t extendPump(uint32_t additionalSeconds) {
     return 0;
   }
 
-  uint32_t maxDurationMs =
-      MAX_PUMP_SECONDS * 1000UL;
+  const auto extension =
+      pump_timing_policy::extendPlannedDuration(
+        pumpPlannedDurationMs,
+        additionalSeconds,
+        MAX_PUMP_SECONDS
+      );
 
-  uint32_t requestedAddMs =
-      additionalSeconds * 1000UL;
+  pumpPlannedDurationMs =
+      extension.plannedDurationMs;
 
-  uint32_t oldDurationMs =
-      pumpPlannedDurationMs;
-
-  uint64_t requestedDuration =
-      static_cast<uint64_t>(
-        pumpPlannedDurationMs
-      ) +
-      requestedAddMs;
-
-  if (
-      requestedDuration >
-      maxDurationMs
-  ) {
-    pumpPlannedDurationMs =
-        maxDurationMs;
-  } else {
-    pumpPlannedDurationMs =
-        static_cast<uint32_t>(
-          requestedDuration
-        );
-  }
-
-  uint32_t actuallyAddedMs =
-      pumpPlannedDurationMs -
-      oldDurationMs;
+  const uint32_t actuallyAddedMs =
+      extension.addedMs;
 
   if (actuallyAddedMs > 0) {
 
@@ -722,16 +703,21 @@ void servicePump() {
     return;
   }
 
-  uint32_t elapsedMs =
-      millis() -
-      pumpSessionStartMs;
+  const uint32_t now =
+      millis();
 
   constexpr uint32_t hardLimitMs =
       MAX_PUMP_SECONDS * 1000UL;
 
   // Absolūtais drošības limits.
   // To nevar pagarināt ar komandām.
-  if (elapsedMs >= hardLimitMs) {
+  if (
+      pump_timing_policy::hasElapsed(
+        now,
+        pumpSessionStartMs,
+        hardLimitMs
+      )
+  ) {
 
     stopPump(
       "sasniegts maksimālais " +
@@ -745,7 +731,11 @@ void servicePump() {
   // Parastais ieplānotais izslēgšanas laiks.
   if (
       pumpPlannedDurationMs > 0 &&
-      elapsedMs >= pumpPlannedDurationMs
+      pump_timing_policy::hasElapsed(
+        now,
+        pumpSessionStartMs,
+        pumpPlannedDurationMs
+      )
   ) {
 
     stopPump(

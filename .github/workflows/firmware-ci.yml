@@ -40,5 +40,8 @@ jobs:
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci
 
+      - name: Run bounded Cppcheck analysis
+        run: pio check -e esp32_check --fail-on-defect=high
+
       - name: Build ESP32 OTA firmware (build only)
         run: pio run -e esp32_ota
