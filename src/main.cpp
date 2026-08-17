@@ -12,6 +12,7 @@
 
 #include "secrets.h"
 #include "command_safety.h"
+#include "network_reconnect_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
 #define FIRMWARE_GIT_REV "unknown"
@@ -59,6 +60,7 @@ constexpr uint32_t WDT_TIMEOUT_S = 30;
 constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000UL;
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000UL;
 constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 60000UL;
+constexpr uint32_t MQTT_TCP_CONNECT_TIMEOUT_MS = 1000UL;
 
 constexpr uint16_t MQTT_KEEPALIVE_S = 30;
 constexpr uint16_t MQTT_SOCKET_TIMEOUT_S = 2;
@@ -1607,16 +1609,18 @@ void connectMQTT() {
 
 void serviceMQTT() {
 
-  if (
-      WiFi.status() !=
-      WL_CONNECTED
-  ) {
+  bool wifiConnected =
+      WiFi.status() ==
+      WL_CONNECTED;
+
+  bool mqttConnected =
+      mqtt.connected();
+
+  if (!wifiConnected) {
     return;
   }
 
-  if (
-      mqtt.connected()
-  ) {
+  if (mqttConnected) {
 
     mqtt.loop();
 
@@ -1626,17 +1630,30 @@ void serviceMQTT() {
   uint32_t now =
       millis();
 
+  // Ja sūknis darbojas, jaunu TCP/MQTT reconnect nemaz nesākam.
+  // Esošu veselīgu MQTT sesiju turpinām apkalpot augstāk ar mqtt.loop(),
+  // lai urgent STOP/OFF joprojām var pienākt nekavējoties.
   if (
-      now -
-      lastMqttReconnectAttempt >=
-      MQTT_RECONNECT_INTERVAL_MS
+      !network_policy::shouldAttemptMqttReconnect(
+        wifiConnected,
+        mqttConnected,
+        pumpRunning,
+        now,
+        lastMqttReconnectAttempt,
+        MQTT_RECONNECT_INTERVAL_MS
+      )
   ) {
-
-    lastMqttReconnectAttempt =
-        now;
-
-    connectMQTT();
+    return;
   }
+
+  lastMqttReconnectAttempt =
+      now;
+
+  // Reconnect notiek tikai ar sūkni OFF. TCP connect ir 1 s limits;
+  // PubSubClient MQTT atbildes logs paliek 2 s, tātad viena OFF-state
+  // reconnect mēģinājuma nominālā augšējā robeža ir ~3 s plus neliels
+  // scheduler/tīkla overhead. Pump-running laikā šis ceļš netiek sākts.
+  connectMQTT();
 }
 
 // ============================================================
@@ -2373,6 +2390,12 @@ void setup() {
   // ----------------------------------------------------------
   // MQTT
   // ----------------------------------------------------------
+
+  // Arduino-ESP32 NetworkClient noklusējums ir 3000 ms.
+  // Mūsu lokālajam brokerim to skaidri ierobežojam līdz 1000 ms.
+  mqttNet.setConnectionTimeout(
+    MQTT_TCP_CONNECT_TIMEOUT_MS
+  );
 
   mqtt.setServer(
     MQTT_SERVER,
