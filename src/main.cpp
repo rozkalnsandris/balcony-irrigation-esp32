@@ -12,6 +12,7 @@
 
 #include "secrets.h"
 #include "command_safety.h"
+#include "command_payload_policy.h"
 #include "network_reconnect_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
@@ -181,6 +182,8 @@ PendingCommand commandQueue[COMMAND_QUEUE_SIZE];
 uint8_t commandQueueHead = 0;
 uint8_t commandQueueTail = 0;
 uint8_t commandQueueCount = 0;
+
+uint32_t oversizedCommandDrops = 0;
 
 // Katrs urgent STOP/OFF palielina epoch. Parastās komandas saglabā
 // epoch, kurā tās tika saņemtas, lai pēc jaunāka STOP varētu
@@ -1388,6 +1391,55 @@ void mqttCallback(
   unsigned int length
 ) {
 
+  bool fromHA = false;
+  bool recognizedTopic = false;
+
+  if (
+      strcmp(
+        topic,
+        T_PUMP_CMD
+      ) == 0
+  ) {
+
+    fromHA = true;
+    recognizedTopic = true;
+
+  } else if (
+      strcmp(
+        topic,
+        T_CMD
+      ) == 0
+  ) {
+
+    recognizedTopic = true;
+  }
+
+  if (!recognizedTopic) {
+    return;
+  }
+
+  // Komandu kontrakts ir ļoti mazs. Pārāk lielu payload atmetam
+  // pirms dinamiska String allocation/copy, neizsaucot MQTT publish/log
+  // callback kontekstā.
+  if (
+      !command_payload_policy::isCommandPayloadLengthAllowed(
+        length
+      )
+  ) {
+
+    oversizedCommandDrops++;
+
+    Serial.printf(
+      "BRĪDINĀJUMS: MQTT komanda par garu (%u > %u baiti)\n",
+      length,
+      static_cast<unsigned int>(
+        command_payload_policy::kMaxCommandPayloadBytes
+      )
+    );
+
+    return;
+  }
+
   String message;
 
   message.reserve(
@@ -1406,33 +1458,6 @@ void mqttCallback(
   }
 
   message.trim();
-
-  String topicString(
-    topic
-  );
-
-  bool fromHA = false;
-  bool recognizedTopic = false;
-
-  if (
-      topicString ==
-      T_PUMP_CMD
-  ) {
-
-    fromHA = true;
-    recognizedTopic = true;
-
-  } else if (
-      topicString ==
-      T_CMD
-  ) {
-
-    recognizedTopic = true;
-  }
-
-  if (!recognizedTopic) {
-    return;
-  }
 
   if (
       command_safety::isUrgentStop(
@@ -2066,7 +2091,7 @@ void processCommand(
         "⚙️ Statuss:\n";
 
     status.reserve(
-      480
+      640
     );
 
     status +=
@@ -2152,6 +2177,40 @@ void processCommand(
           1024
         ) +
         " KB\n";
+
+    status +=
+        "Min. brīvā atmiņa: " +
+        String(
+          ESP.getMinFreeHeap() /
+          1024
+        ) +
+        " KB\n";
+
+    status +=
+        "Lielākais heap bloks: " +
+        String(
+          ESP.getMaxAllocHeap() /
+          1024
+        ) +
+        " KB\n";
+
+    status +=
+        "Loop steks min. brīvs: " +
+        String(
+          static_cast<unsigned long>(
+            uxTaskGetStackHighWaterMark(
+              nullptr
+            )
+          )
+        ) +
+        " B\n";
+
+    status +=
+        "Pārāk garas komandas: " +
+        String(
+          oversizedCommandDrops
+        ) +
+        "\n";
 
     status +=
         "Laiks: " +
