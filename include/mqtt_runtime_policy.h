@@ -13,6 +13,31 @@ constexpr std::uint16_t kKeepAliveSeconds = 30U;
 constexpr std::size_t kRxBufferBytes = 1024U;
 constexpr std::size_t kTxBufferBytes = 1024U;
 
+constexpr std::uint32_t kConnectAttemptBudgetMs =
+    kTcpConnectionTimeoutMs +
+    static_cast<std::uint32_t>(kMqttAckTimeoutSeconds) * 1000U +
+    500U;
+constexpr std::uint32_t kDisconnectCleanupBudgetMs = 250U;
+constexpr std::size_t kMaxBestEffortQueuePackets = 4U;
+constexpr std::size_t kTrackedTopicBytes = 64U;
+constexpr std::size_t kTrackedPayloadBytes = 896U;
+
+constexpr std::size_t kMqttFixedHeaderBytes = 1U;
+constexpr std::size_t kMqttRemainingLengthMaxBytes = 4U;
+constexpr std::size_t kMqttTopicLengthFieldBytes = 2U;
+constexpr std::size_t kMqttPacketIdBytes = 2U;
+constexpr std::size_t kTrackedPublishWorstCaseBytes =
+    kMqttFixedHeaderBytes +
+    kMqttRemainingLengthMaxBytes +
+    kMqttTopicLengthFieldBytes +
+    kTrackedTopicBytes +
+    kMqttPacketIdBytes +
+    kTrackedPayloadBytes;
+
+static_assert(
+    kTrackedPublishWorstCaseBytes <= kTxBufferBytes,
+    "tracked QoS1 publish must fit the explicit MQTT TX buffer");
+
 enum class RejectReason : std::uint8_t {
   none = 0,
   oversized = 1,
@@ -69,6 +94,17 @@ inline bool shouldAbortTransitionalConnection(
     bool connected,
     bool disconnected) {
   return pumpRunning && !connected && !disconnected;
+}
+
+inline bool hasElapsed(
+    std::uint32_t now,
+    std::uint32_t startedAt,
+    std::uint32_t durationMs) {
+  return static_cast<std::uint32_t>(now - startedAt) >= durationMs;
+}
+
+inline bool canQueueBestEffort(std::size_t currentQueuePackets) {
+  return currentQueuePackets < kMaxBestEffortQueuePackets;
 }
 
 }  // namespace mqtt_runtime_policy

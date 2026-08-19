@@ -2,10 +2,19 @@
 
 #include "mqtt_runtime_adapter.h"
 
+#include <Arduino.h>
+
 #include <cstring>
 
 MqttRuntimeAdapter::MqttRuntimeAdapter()
     : espMqttClient(espMqttClientTypes::UseInternalTask::NO) {
+  _client.client.setConnectionTimeout(
+      mqtt_runtime_policy::kTcpConnectionTimeoutMs);
+
+  setKeepAlive(mqtt_runtime_policy::kKeepAliveSeconds)
+      .setTimeout(mqtt_runtime_policy::kMqttAckTimeoutSeconds)
+      .setCleanSession(true);
+
   onConnect([this](bool sessionPresent) {
     if (connectedHandler_ != nullptr) {
       connectedHandler_(sessionPresent);
@@ -14,6 +23,7 @@ MqttRuntimeAdapter::MqttRuntimeAdapter()
 
   onDisconnect([this](espMqttClientTypes::DisconnectReason reason) {
     resetAssembly();
+    resetTrackedInFlight();
     if (disconnectedHandler_ != nullptr) {
       disconnectedHandler_(reason);
     }
@@ -29,6 +39,10 @@ MqttRuntimeAdapter::MqttRuntimeAdapter()
           std::size_t total) {
         handleIncoming(properties, topic, payload, len, index, total);
       });
+
+  onPublish([this](std::uint16_t packetId) {
+    handlePublishAck(packetId);
+  });
 }
 
 void MqttRuntimeAdapter::configure(
@@ -39,9 +53,6 @@ void MqttRuntimeAdapter::configure(
     const char* password,
     const char* willTopic,
     const char* willPayload) {
-  _client.client.setConnectionTimeout(
-      mqtt_runtime_policy::kTcpConnectionTimeoutMs);
-
   setServer(server, port)
       .setClientId(clientId)
       .setCredentials(username, password)
@@ -84,7 +95,34 @@ bool MqttRuntimeAdapter::startConnect() {
     return false;
   }
 
-  return connect();
+  return espMqttClient::connect();
+}
+
+bool MqttRuntimeAdapter::connectBlocking() {
+  if (!startConnect()) {
+    return false;
+  }
+
+  const std::uint32_t startedAt = millis();
+
+  while (isTransitioning() &&
+         !mqtt_runtime_policy::hasElapsed(
+             millis(),
+             startedAt,
+             mqtt_runtime_policy::kConnectAttemptBudgetMs)) {
+    espMqttClient::loop();
+    delay(1);
+  }
+
+  if (connected()) {
+    return true;
+  }
+
+  if (isTransitioning()) {
+    forceDisconnect();
+  }
+
+  return false;
 }
 
 bool MqttRuntimeAdapter::abortTransition() {
@@ -93,11 +131,40 @@ bool MqttRuntimeAdapter::abortTransition() {
   }
 
   resetAssembly();
-  return disconnect(true);
+  return forceDisconnect();
+}
+
+bool MqttRuntimeAdapter::forceDisconnect() {
+  if (disconnected()) {
+    resetAssembly();
+    resetTrackedInFlight();
+    return true;
+  }
+
+  espMqttClient::disconnect(true);
+
+  const std::uint32_t startedAt = millis();
+  while (!disconnected() &&
+         !mqtt_runtime_policy::hasElapsed(
+             millis(),
+             startedAt,
+             mqtt_runtime_policy::kDisconnectCleanupBudgetMs)) {
+    espMqttClient::loop();
+    delay(1);
+  }
+
+  resetAssembly();
+
+  if (disconnected()) {
+    resetTrackedInFlight();
+    return true;
+  }
+
+  return false;
 }
 
 void MqttRuntimeAdapter::service() {
-  loop();
+  espMqttClient::loop();
 }
 
 bool MqttRuntimeAdapter::subscribeTopic(const char* topic, std::uint8_t qos) {
@@ -105,7 +172,7 @@ bool MqttRuntimeAdapter::subscribeTopic(const char* topic, std::uint8_t qos) {
     return false;
   }
 
-  return subscribe(topic, qos) != 0U;
+  return espMqttClient::subscribe(topic, qos) != 0U;
 }
 
 bool MqttRuntimeAdapter::publishMessage(
@@ -117,7 +184,106 @@ bool MqttRuntimeAdapter::publishMessage(
     return false;
   }
 
-  return publish(topic, qos, retain, payload) != 0U;
+  return espMqttClient::publish(topic, qos, retain, payload) != 0U;
+}
+
+bool MqttRuntimeAdapter::subscribeBestEffort(
+    const char* topic,
+    std::uint8_t qos) {
+  if (!connected() ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const bool accepted = espMqttClient::subscribe(topic, qos) != 0U;
+  if (accepted) {
+    espMqttClient::loop();
+  }
+
+  return accepted;
+}
+
+bool MqttRuntimeAdapter::publishBestEffort(
+    const char* topic,
+    const char* payload,
+    bool retain) {
+  if (!connected() ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const bool accepted =
+      espMqttClient::publish(topic, 0U, retain, payload) != 0U;
+  if (accepted) {
+    espMqttClient::loop();
+  }
+
+  return accepted;
+}
+
+bool MqttRuntimeAdapter::startTrackedPublish(
+    const char* topic,
+    const char* payload,
+    bool retain) {
+  if (trackedActive_ || topic == nullptr || payload == nullptr) {
+    return false;
+  }
+
+  const std::size_t topicLength = std::strlen(topic);
+  const std::size_t payloadLength = std::strlen(payload);
+
+  if (topicLength + 1U > sizeof(trackedTopic_) ||
+      payloadLength + 1U > sizeof(trackedPayload_)) {
+    return false;
+  }
+
+  std::memcpy(trackedTopic_, topic, topicLength + 1U);
+  std::memcpy(trackedPayload_, payload, payloadLength + 1U);
+
+  trackedActive_ = true;
+  trackedInFlight_ = false;
+  trackedRetain_ = retain;
+  trackedPacketId_ = 0U;
+  return true;
+}
+
+bool MqttRuntimeAdapter::pumpTrackedPublish() {
+  if (!trackedActive_) {
+    return false;
+  }
+
+  if (trackedInFlight_) {
+    return true;
+  }
+
+  if (!connected() ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const std::uint16_t packetId =
+      espMqttClient::publish(
+          trackedTopic_,
+          1U,
+          trackedRetain_,
+          trackedPayload_);
+
+  if (packetId == 0U) {
+    return false;
+  }
+
+  trackedPacketId_ = packetId;
+  trackedInFlight_ = true;
+  espMqttClient::loop();
+  return true;
+}
+
+bool MqttRuntimeAdapter::trackedPublishBusy() const {
+  return trackedActive_;
+}
+
+bool MqttRuntimeAdapter::trackedPublishInFlight() const {
+  return trackedInFlight_;
 }
 
 void MqttRuntimeAdapter::resetAssembly() {
@@ -210,6 +376,29 @@ void MqttRuntimeAdapter::handleIncoming(
 
     resetAssembly();
   }
+}
+
+void MqttRuntimeAdapter::handlePublishAck(std::uint16_t packetId) {
+  if (!trackedActive_ || !trackedInFlight_ ||
+      packetId != trackedPacketId_) {
+    return;
+  }
+
+  clearTrackedPublish();
+}
+
+void MqttRuntimeAdapter::resetTrackedInFlight() {
+  trackedInFlight_ = false;
+  trackedPacketId_ = 0U;
+}
+
+void MqttRuntimeAdapter::clearTrackedPublish() {
+  trackedActive_ = false;
+  trackedInFlight_ = false;
+  trackedRetain_ = false;
+  trackedPacketId_ = 0U;
+  trackedTopic_[0] = '\0';
+  trackedPayload_[0] = '\0';
 }
 
 #endif
