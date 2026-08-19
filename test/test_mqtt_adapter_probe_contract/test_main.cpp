@@ -58,6 +58,9 @@ void test_probe_timeouts_are_explicit_and_bounded() {
   TEST_ASSERT_EQUAL_UINT16(
       1U,
       mqtt_adapter_probe_contract::kOperationTimeoutSeconds);
+  TEST_ASSERT_EQUAL_UINT32(
+      1000U,
+      mqtt_adapter_probe_contract::kTcpConnectionTimeoutMs);
   TEST_ASSERT_EQUAL_UINT16(
       30U,
       mqtt_adapter_probe_contract::kKeepAliveSeconds);

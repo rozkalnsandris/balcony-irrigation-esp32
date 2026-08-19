@@ -45,9 +45,40 @@ The release source exposes the properties needed for a safer future adapter:
 - an ESP32 constructor using `UseInternalTask::NO`, allowing the application to
   own calls to the MQTT loop instead of accepting an autonomous internal task
 
+An exact-release state-machine review also shows that `loop()` in the disconnected
+state does not initiate a new connection. An application call to `connect()` starts
+the connection state. This means a future adapter can keep the existing
+`network_policy::shouldAttemptMqttReconnect(... !pumpRunning ...)` decision as the
+outer reconnect gate.
+
 The compile probe intentionally selects `UseInternalTask::NO`. That does **not**
-yet prove a full migration is safe; it only proves the exact candidate API can be
+yet prove a full migration is safe; it proves the exact candidate API can be
 compiled against the repository's pinned pioarduino platform.
+
+## TCP connect timeout boundary
+
+The candidate's public `setTimeout()` is not the same as the current firmware's
+explicit TCP connection timeout. In espMqttClient 1.7.3, `ClientSync::connect()`
+uses the internal `NetworkClient` / `WiFiClient` `connect(host, port)` path without
+an explicit timeout argument.
+
+The current firmware treats a 1000 ms TCP connect bound as a safety property. The
+probe therefore includes a compile-only feasibility shim:
+
+- a narrow subclass of `espMqttClient`;
+- access to the candidate's protected `ClientSync _client`;
+- access to `ClientSync::client` (the underlying `NetworkClient` / `WiFiClient`);
+- a call to `setConnectionTimeout(1000)` on that transport.
+
+This performs no network operation. Its purpose is only to prove whether the exact
+candidate release plus exact pinned pioarduino toolchain can express the existing
+TCP bound.
+
+This shim couples the adapter to protected/internal candidate layout. A successful
+compile is therefore **feasibility evidence, not an architectural approval**. A
+future runtime migration must decide whether that coupling is acceptable, whether
+an upstream/public transport-timeout API is preferable, or whether this candidate
+should be rejected.
 
 ## Probe environment
 
@@ -57,7 +88,8 @@ because `src/main.cpp` is intentionally not migrated by this spike.
 
 The compile-only source `src/mqtt_adapter_probe.cpp`:
 
-- creates an `espMqttClient` with `UseInternalTask::NO`;
+- creates the candidate with `UseInternalTask::NO`;
+- compile-checks a 1000 ms underlying TCP connection timeout;
 - explicitly sets a 1-second candidate MQTT operation timeout;
 - explicitly sets a 30-second keepalive;
 - uses a deterministic non-secret probe ClientId;
@@ -66,7 +98,7 @@ The compile-only source `src/mqtt_adapter_probe.cpp`:
   network-producing operation.
 
 The function itself is not called by firmware. It exists only to force compile/link
-validation of the candidate API.
+validation of the candidate API and bounded-transport feasibility.
 
 ## Pure adapter boundary
 
@@ -87,7 +119,9 @@ The probe contract currently requires:
 4. duplicate metadata surfaced to higher-level command safety rather than silently
    rejected or treated as proof of a repeated command;
 5. a deterministic probe ClientId that stays within the MQTT 3.1.1 mandatory
-   alphanumeric 1-23 byte compatibility set.
+   alphanumeric 1-23 byte compatibility set;
+6. separate explicit constants for the 1000 ms TCP connection bound, 1-second MQTT
+   operation timeout, and 30-second keepalive.
 
 This spike does not introduce application-level duplicate suppression. Pump-start
 commands (`laist`, `laist_N`) remain duplicate-sensitive in the existing protocol,
@@ -102,6 +136,7 @@ A future migration is acceptable only if it preserves the already tracked polici
 - a newer stop epoch suppresses stale queued pump-start commands;
 - MQTT command payloads are bounded before dynamic `String` construction;
 - a new MQTT reconnect is not started while the pump is running;
+- an allowed reconnect attempt retains an explicit bounded TCP connect timeout;
 - the absolute pump hard limit remains 180 seconds;
 - retained command messages are never accepted.
 
@@ -126,7 +161,7 @@ No upload target is invoked.
 
 Native tests additionally prove the pure candidate contract for payload bounds,
 retained-message rejection, supported QoS, duplicate metadata visibility, ClientId
-compatibility, and explicit timeout/keepalive constants.
+compatibility, and explicit TCP/MQTT timeout and keepalive constants.
 
 ## Success and next gate
 
@@ -134,9 +169,11 @@ A green spike means only:
 
 - espMqttClient 1.7.3 resolves and compiles on the exact pinned platform;
 - the API shape expected by the adapter is valid;
+- the exact toolchain can compile the narrow transport-timeout feasibility shim;
 - the pure candidate contract passes native tests;
 - existing firmware build/static-analysis gates still pass.
 
 It does **not** approve a runtime migration. After a successful spike, issue #28
-must decide whether to prepare a separate migration PR or to run an ESP-MQTT
-feasibility spike first. Any production OTA/flash remains separately owner-gated.
+must decide whether to prepare a separate migration PR, seek a cleaner transport
+timeout boundary, or run an ESP-MQTT feasibility spike first. Any production
+OTA/flash remains separately owner-gated.

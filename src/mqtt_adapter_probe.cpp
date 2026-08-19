@@ -9,8 +9,27 @@
 
 namespace mqtt_adapter_probe {
 
+// Compile-only feasibility shim. espMqttClient keeps its ClientSync transport
+// protected and ClientSync exposes its NetworkClient/WiFiClient publicly. This
+// proves the current release/toolchain can preserve the firmware's explicit TCP
+// connect bound without performing any network operation. A future runtime
+// migration still needs to decide whether this internal-layout coupling is an
+// acceptable maintained adapter boundary.
+class BoundedProbeClient : public espMqttClient {
+ public:
+  BoundedProbeClient()
+      : espMqttClient(espMqttClientTypes::UseInternalTask::NO) {}
+
+  void setTcpConnectionTimeoutMs(std::uint32_t timeoutMs) {
+    _client.client.setConnectionTimeout(timeoutMs);
+  }
+};
+
 void compileApiProbe() {
-  espMqttClient client(espMqttClientTypes::UseInternalTask::NO);
+  BoundedProbeClient client;
+
+  client.setTcpConnectionTimeoutMs(
+      mqtt_adapter_probe_contract::kTcpConnectionTimeoutMs);
 
   client
       .setKeepAlive(mqtt_adapter_probe_contract::kKeepAliveSeconds)
