@@ -37,6 +37,9 @@ jobs:
       - name: Create non-secret CI configuration
         run: cp include/secrets.example.h include/secrets.h
 
+      - name: Build ESP-MQTT Arduino-only compile probe
+        run: pio run -e esp32_esp_mqtt_probe
+
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci
 
