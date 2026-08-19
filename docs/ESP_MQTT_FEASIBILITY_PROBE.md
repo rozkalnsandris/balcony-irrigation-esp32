@@ -4,13 +4,13 @@ Issue: `balcony-irrigation-esp32#28`
 
 ## Purpose
 
-This is a **source-only compile probe** used to compare Espressif ESP-MQTT with
-the already green `espMqttClient` feasibility PR #29.
+This is a **source-only compile/link probe** used to compare Espressif ESP-MQTT
+with the already green `espMqttClient` feasibility PR #29.
 
-The first question is deliberately narrow: on the repository's exact pinned
-pioarduino platform (`55.03.311`, Arduino framework), are the ESP-IDF 5.5
-ESP-MQTT public headers and configuration/event types directly available without
-changing the firmware to an ESP-IDF or mixed-framework build?
+The question is deliberately narrow: on the repository's exact pinned pioarduino
+platform (`55.03.311`, Arduino framework), are the ESP-IDF 5.5 ESP-MQTT public
+headers, configuration/event types, and precompiled core symbols directly available
+without changing the firmware to an ESP-IDF or mixed-framework build?
 
 This probe does not initialize or start an MQTT client and performs no network
 operation.
@@ -52,16 +52,44 @@ The compile-only source `src/esp_mqtt_compile_probe.cpp`:
 The functions are not called by the firmware. They exist only to force the exact
 header/API contract through the pinned CI toolchain.
 
+## Link-only symbol gate
+
+A successful header compile alone does not prove that the Arduino-only framework
+package also exposes the precompiled ESP-MQTT implementation at link time.
+
+The probe environment therefore additionally passes linker undefined-symbol roots:
+
+- `esp_mqtt_client_init`
+- `esp_mqtt_client_start`
+
+using `-Wl,-u,<symbol>`.
+
+This forces the final firmware link to resolve those ESP-MQTT symbols while still
+making **no function call** and creating no MQTT client. If the symbols are not in
+the Arduino-only precompiled libraries, CI must fail at link time instead of giving
+us a false-positive header-only result.
+
 ## Interpretation
 
-If this Arduino-only probe passes, ESP-MQTT's public config/event API is directly
-available to the current build class and a later spike can test link/runtime
-adapter feasibility without first changing framework mode.
+If both compile and link gates pass, the current Arduino-only build class directly
+contains the ESP-MQTT public API and binary implementation. A later, separately
+reviewed adapter spike can then evaluate initialization/event/task integration
+without first changing framework mode.
 
-If it fails because `mqtt_client.h` or the MQTT component is unavailable, that is
-useful evidence: issue #28 will record the exact failure before separately testing
-an ESP-IDF/mixed-framework integration path. A failed first probe must not be
-hidden by immediately broadening the build architecture.
+If the link gate fails, that is also useful evidence: issue #28 will preserve the
+header-pass/link-fail distinction before testing an ESP-IDF/mixed-framework path.
+We will not hide a failed minimal integration by silently broadening the build
+architecture in the same commit.
+
+## Runtime architecture remains unproven
+
+Exact ESP-MQTT 5.5.5 source review shows that `esp_mqtt_client_start()` creates a
+dedicated FreeRTOS MQTT task. That is a materially different concurrency model from
+the current PubSubClient callback driven synchronously by the Arduino loop task.
+
+Therefore even a fully green compile/link probe does **not** approve a migration.
+A future runtime design must explicitly protect the urgent STOP/stop-epoch/shared
+pump state across task boundaries and measure STOP latency.
 
 ## Safety boundary
 
