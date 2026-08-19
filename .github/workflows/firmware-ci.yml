@@ -37,6 +37,9 @@ jobs:
       - name: Create non-secret CI configuration
         run: cp include/secrets.example.h include/secrets.h
 
+      - name: Build espMqttClient adapter compile probe
+        run: pio run -e esp32_mqtt_adapter_probe
+
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci
 
