@@ -88,7 +88,7 @@ bool MqttRuntimeAdapter::startConnect() {
 }
 
 bool MqttRuntimeAdapter::abortTransition() {
-  if (disconnected()) {
+  if (!isTransitioning()) {
     return false;
   }
 
