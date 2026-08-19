@@ -37,8 +37,11 @@ as a complete CONNACK deadline, the adapter adds an explicit total connection bu
 `1000 ms + 2000 ms + 500 ms scheduler margin = 3500 ms`.
 
 The wait uses wrap-safe unsigned `millis()` arithmetic. If the candidate has not
-reached either connected or disconnected by the deadline, the transition is force-
-closed and cleaned up with a separate 250 ms bounded disconnect budget.
+reached either connected or disconnected by the deadline, the adapter requests a
+forced disconnect and services cleanup for a separate bounded 250 ms window.
+`forceDisconnect()` returns `false` if the client still has not reached the terminal
+disconnected state when that cleanup window expires; callers must treat that as a
+failed cleanup, not as proof that the transport was force-closed.
 
 This remains acceptable only because the existing reconnect policy starts a new
 attempt while the pump is OFF. Connected MQTT servicing stays in the Arduino loop
@@ -74,7 +77,10 @@ remains QoS0.
 The adapter owns one fixed tracked slot:
 
 - topic storage: 64 bytes;
-- payload storage: 1024 bytes;
+- payload storage: 896 bytes;
+- conservative worst-case MQTT QoS1 PUBLISH size: 969 bytes;
+- compile-time `static_assert` requires that worst-case packet size to remain within
+  the explicit 1024-byte TX buffer;
 - no dynamic allocation in the tracked-copy layer;
 - the payload may be accepted while MQTT is disconnected;
 - once connected, `pumpTrackedPublish()` sends it with QoS1;
