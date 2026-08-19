@@ -56,7 +56,7 @@ void test_probe_client_id_is_mqtt311_mandatory_compatible() {
 
 void test_probe_timeouts_are_explicit_and_bounded() {
   TEST_ASSERT_EQUAL_UINT16(
-      1U,
+      2U,
       mqtt_adapter_probe_contract::kOperationTimeoutSeconds);
   TEST_ASSERT_EQUAL_UINT32(
       1000U,

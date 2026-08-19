@@ -55,7 +55,7 @@ The compile probe intentionally selects `UseInternalTask::NO`. That does **not**
 yet prove a full migration is safe; it proves the exact candidate API can be
 compiled against the repository's pinned pioarduino platform.
 
-## TCP connect timeout boundary
+## Timeout boundaries
 
 The candidate's public `setTimeout()` is not the same as the current firmware's
 explicit TCP connection timeout. In espMqttClient 1.7.3, `ClientSync::connect()`
@@ -70,9 +70,19 @@ probe therefore includes a compile-only feasibility shim:
 - access to `ClientSync::client` (the underlying `NetworkClient` / `WiFiClient`);
 - a call to `setConnectionTimeout(1000)` on that transport.
 
-This performs no network operation. Its purpose is only to prove whether the exact
-candidate release plus exact pinned pioarduino toolchain can express the existing
-TCP bound.
+Pinned Arduino-ESP32 3.3.11 source confirms this `NetworkClient` timeout is used by
+the TCP connect path; its receive buffer is serviced non-blockingly with
+`MSG_DONTWAIT`.
+
+The candidate's separate `setTimeout()` stores an MQTT/outbox acknowledgement
+window used by the packet state machine. It is therefore kept as a distinct policy
+from the 1000 ms transport bound. The probe uses **2 seconds** to stay aligned with
+the current PubSubClient `MQTT_SOCKET_TIMEOUT_S = 2` response window rather than
+incorrectly copying the 1-second TCP-connect value into both layers.
+
+This shim performs no network operation. Its purpose is only to prove whether the
+exact candidate release plus exact pinned pioarduino toolchain can express the
+existing TCP bound.
 
 This shim couples the adapter to protected/internal candidate layout. A successful
 compile is therefore **feasibility evidence, not an architectural approval**. A
@@ -90,7 +100,7 @@ The compile-only source `src/mqtt_adapter_probe.cpp`:
 
 - creates the candidate with `UseInternalTask::NO`;
 - compile-checks a 1000 ms underlying TCP connection timeout;
-- explicitly sets a 1-second candidate MQTT operation timeout;
+- explicitly sets a 2-second candidate MQTT acknowledgement timeout;
 - explicitly sets a 30-second keepalive;
 - uses a deterministic non-secret probe ClientId;
 - type-checks incoming message metadata and outgoing publish acknowledgement;
@@ -120,8 +130,8 @@ The probe contract currently requires:
    rejected or treated as proof of a repeated command;
 5. a deterministic probe ClientId that stays within the MQTT 3.1.1 mandatory
    alphanumeric 1-23 byte compatibility set;
-6. separate explicit constants for the 1000 ms TCP connection bound, 1-second MQTT
-   operation timeout, and 30-second keepalive.
+6. separate explicit constants for the 1000 ms TCP connection bound, 2-second MQTT
+   acknowledgement timeout, and 30-second keepalive.
 
 This spike does not introduce application-level duplicate suppression. Pump-start
 commands (`laist`, `laist_N`) remain duplicate-sensitive in the existing protocol,

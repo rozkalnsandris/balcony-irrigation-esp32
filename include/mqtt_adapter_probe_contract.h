@@ -7,7 +7,7 @@
 
 namespace mqtt_adapter_probe_contract {
 
-constexpr std::uint16_t kOperationTimeoutSeconds = 1U;
+constexpr std::uint16_t kOperationTimeoutSeconds = 2U;
 constexpr std::uint32_t kTcpConnectionTimeoutMs = 1000U;
 constexpr std::uint16_t kKeepAliveSeconds = 30U;
 constexpr char kProbeClientId[] = "balkonsmqttprobe";
