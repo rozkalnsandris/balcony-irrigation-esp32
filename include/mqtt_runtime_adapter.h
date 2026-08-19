@@ -41,7 +41,9 @@ class MqttRuntimeAdapter : public espMqttClient {
   bool isTransitioning() const;
 
   bool startConnect();
+  bool connectBlocking();
   bool abortTransition();
+  bool forceDisconnect();
   void service();
 
   bool subscribeTopic(const char* topic, std::uint8_t qos);
@@ -50,6 +52,20 @@ class MqttRuntimeAdapter : public espMqttClient {
       const char* payload,
       std::uint8_t qos,
       bool retain);
+
+  bool subscribeBestEffort(const char* topic, std::uint8_t qos);
+  bool publishBestEffort(
+      const char* topic,
+      const char* payload,
+      bool retain = false);
+
+  bool startTrackedPublish(
+      const char* topic,
+      const char* payload,
+      bool retain = false);
+  bool pumpTrackedPublish();
+  bool trackedPublishBusy() const;
+  bool trackedPublishInFlight() const;
 
  private:
   void resetAssembly();
@@ -63,6 +79,9 @@ class MqttRuntimeAdapter : public espMqttClient {
       std::size_t len,
       std::size_t index,
       std::size_t total);
+  void handlePublishAck(std::uint16_t packetId);
+  void resetTrackedInFlight();
+  void clearTrackedPublish();
 
   ConnectedHandler connectedHandler_ = nullptr;
   DisconnectedHandler disconnectedHandler_ = nullptr;
@@ -76,4 +95,11 @@ class MqttRuntimeAdapter : public espMqttClient {
   std::size_t nextIndex_ = 0;
   mqtt_runtime_policy::InboundMetadata metadata_{0U, false, false, 0U};
   std::uint8_t commandBuffer_[command_payload_policy::kMaxCommandPayloadBytes] = {0};
+
+  bool trackedActive_ = false;
+  bool trackedInFlight_ = false;
+  bool trackedRetain_ = false;
+  std::uint16_t trackedPacketId_ = 0U;
+  char trackedTopic_[mqtt_runtime_policy::kTrackedTopicBytes] = {0};
+  char trackedPayload_[mqtt_runtime_policy::kTrackedPayloadBytes] = {0};
 };

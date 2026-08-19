@@ -82,6 +82,29 @@ void test_timeout_and_buffer_contracts_are_explicit() {
   TEST_ASSERT_EQUAL_UINT16(30U, mqtt_runtime_policy::kKeepAliveSeconds);
   TEST_ASSERT_EQUAL_UINT32(1024U, mqtt_runtime_policy::kRxBufferBytes);
   TEST_ASSERT_EQUAL_UINT32(1024U, mqtt_runtime_policy::kTxBufferBytes);
+  TEST_ASSERT_EQUAL_UINT32(3500U, mqtt_runtime_policy::kConnectAttemptBudgetMs);
+  TEST_ASSERT_EQUAL_UINT32(250U, mqtt_runtime_policy::kDisconnectCleanupBudgetMs);
+}
+
+void test_elapsed_check_is_wrap_safe() {
+  TEST_ASSERT_FALSE(mqtt_runtime_policy::hasElapsed(1499U, 1000U, 500U));
+  TEST_ASSERT_TRUE(mqtt_runtime_policy::hasElapsed(1500U, 1000U, 500U));
+
+  const std::uint32_t startedAt = 0xFFFFFFF0U;
+  TEST_ASSERT_FALSE(mqtt_runtime_policy::hasElapsed(0x0000000EU, startedAt, 31U));
+  TEST_ASSERT_TRUE(mqtt_runtime_policy::hasElapsed(0x0000000FU, startedAt, 31U));
+}
+
+void test_best_effort_queue_is_bounded() {
+  TEST_ASSERT_TRUE(mqtt_runtime_policy::canQueueBestEffort(0U));
+  TEST_ASSERT_TRUE(mqtt_runtime_policy::canQueueBestEffort(3U));
+  TEST_ASSERT_FALSE(mqtt_runtime_policy::canQueueBestEffort(4U));
+  TEST_ASSERT_FALSE(mqtt_runtime_policy::canQueueBestEffort(100U));
+}
+
+void test_tracked_publish_storage_is_explicit() {
+  TEST_ASSERT_EQUAL_UINT32(64U, mqtt_runtime_policy::kTrackedTopicBytes);
+  TEST_ASSERT_EQUAL_UINT32(1024U, mqtt_runtime_policy::kTrackedPayloadBytes);
 }
 
 void test_duplicate_metadata_is_representable_without_dedup_policy() {
@@ -102,6 +125,9 @@ int main() {
   RUN_TEST(test_chunk_overrun_is_rejected);
   RUN_TEST(test_transitional_connection_is_aborted_only_when_pump_runs);
   RUN_TEST(test_timeout_and_buffer_contracts_are_explicit);
+  RUN_TEST(test_elapsed_check_is_wrap_safe);
+  RUN_TEST(test_best_effort_queue_is_bounded);
+  RUN_TEST(test_tracked_publish_storage_is_explicit);
   RUN_TEST(test_duplicate_metadata_is_representable_without_dedup_policy);
   return UNITY_END();
 }
