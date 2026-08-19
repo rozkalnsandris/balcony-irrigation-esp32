@@ -20,7 +20,23 @@ constexpr std::uint32_t kConnectAttemptBudgetMs =
 constexpr std::uint32_t kDisconnectCleanupBudgetMs = 250U;
 constexpr std::size_t kMaxBestEffortQueuePackets = 4U;
 constexpr std::size_t kTrackedTopicBytes = 64U;
-constexpr std::size_t kTrackedPayloadBytes = 1024U;
+constexpr std::size_t kTrackedPayloadBytes = 896U;
+
+constexpr std::size_t kMqttFixedHeaderBytes = 1U;
+constexpr std::size_t kMqttRemainingLengthMaxBytes = 4U;
+constexpr std::size_t kMqttTopicLengthFieldBytes = 2U;
+constexpr std::size_t kMqttPacketIdBytes = 2U;
+constexpr std::size_t kTrackedPublishWorstCaseBytes =
+    kMqttFixedHeaderBytes +
+    kMqttRemainingLengthMaxBytes +
+    kMqttTopicLengthFieldBytes +
+    kTrackedTopicBytes +
+    kMqttPacketIdBytes +
+    kTrackedPayloadBytes;
+
+static_assert(
+    kTrackedPublishWorstCaseBytes <= kTxBufferBytes,
+    "tracked QoS1 publish must fit the explicit MQTT TX buffer");
 
 enum class RejectReason : std::uint8_t {
   none = 0,

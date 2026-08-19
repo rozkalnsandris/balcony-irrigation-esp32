@@ -102,9 +102,15 @@ void test_best_effort_queue_is_bounded() {
   TEST_ASSERT_FALSE(mqtt_runtime_policy::canQueueBestEffort(100U));
 }
 
-void test_tracked_publish_storage_is_explicit() {
+void test_tracked_publish_storage_is_explicit_and_tx_bounded() {
   TEST_ASSERT_EQUAL_UINT32(64U, mqtt_runtime_policy::kTrackedTopicBytes);
-  TEST_ASSERT_EQUAL_UINT32(1024U, mqtt_runtime_policy::kTrackedPayloadBytes);
+  TEST_ASSERT_EQUAL_UINT32(896U, mqtt_runtime_policy::kTrackedPayloadBytes);
+  TEST_ASSERT_TRUE(
+      mqtt_runtime_policy::kTrackedPublishWorstCaseBytes <=
+      mqtt_runtime_policy::kTxBufferBytes);
+  TEST_ASSERT_EQUAL_UINT32(
+      969U,
+      mqtt_runtime_policy::kTrackedPublishWorstCaseBytes);
 }
 
 void test_duplicate_metadata_is_representable_without_dedup_policy() {
@@ -127,7 +133,7 @@ int main() {
   RUN_TEST(test_timeout_and_buffer_contracts_are_explicit);
   RUN_TEST(test_elapsed_check_is_wrap_safe);
   RUN_TEST(test_best_effort_queue_is_bounded);
-  RUN_TEST(test_tracked_publish_storage_is_explicit);
+  RUN_TEST(test_tracked_publish_storage_is_explicit_and_tx_bounded);
   RUN_TEST(test_duplicate_metadata_is_representable_without_dedup_policy);
   return UNITY_END();
 }
