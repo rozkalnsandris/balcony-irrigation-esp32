@@ -59,6 +59,13 @@ class MqttRuntimeAdapter : public espMqttClient {
       const char* payload,
       bool retain = false);
 
+  bool startTrackedSubscription(const char* topic);
+  mqtt_runtime_policy::TrackedSubscriptionState trackedSubscriptionState(
+      std::uint32_t now) const;
+  mqtt_runtime_policy::SubscriptionAckResult trackedSubscriptionFailure(
+      std::uint32_t now) const;
+  void resetTrackedSubscription();
+
   bool startTrackedPublish(
       const char* topic,
       const char* payload,
@@ -79,8 +86,12 @@ class MqttRuntimeAdapter : public espMqttClient {
       std::size_t len,
       std::size_t index,
       std::size_t total);
+  void handleSubscribeAck(
+      std::uint16_t packetId,
+      const espMqttClientTypes::SubscribeReturncode* returnCodes,
+      std::size_t count);
+  void latchTrackedSubscriptionTimeout(std::uint32_t now) const;
   void handlePublishAck(std::uint16_t packetId);
-  void resetTrackedInFlight();
   void clearTrackedPublish();
 
   ConnectedHandler connectedHandler_ = nullptr;
@@ -96,10 +107,17 @@ class MqttRuntimeAdapter : public espMqttClient {
   mqtt_runtime_policy::InboundMetadata metadata_{0U, false, false, 0U};
   std::uint8_t commandBuffer_[command_payload_policy::kMaxCommandPayloadBytes] = {0};
 
-  bool trackedActive_ = false;
-  bool trackedInFlight_ = false;
+  mutable mqtt_runtime_policy::TrackedSubscriptionState trackedSubscriptionState_ =
+      mqtt_runtime_policy::TrackedSubscriptionState::idle;
+  mutable mqtt_runtime_policy::SubscriptionAckResult trackedSubscriptionFailure_ =
+      mqtt_runtime_policy::SubscriptionAckResult::none;
+  mutable std::uint16_t trackedSubscriptionPacketId_ = 0U;
+  mutable std::uint32_t trackedSubscriptionStartedAt_ = 0U;
+
+  mqtt_runtime_policy::TrackedPublishState trackedPublishState_{
+      mqtt_runtime_policy::TrackedPublishPhase::empty,
+      0U};
   bool trackedRetain_ = false;
-  std::uint16_t trackedPacketId_ = 0U;
   char trackedTopic_[mqtt_runtime_policy::kTrackedTopicBytes] = {0};
   char trackedPayload_[mqtt_runtime_policy::kTrackedPayloadBytes] = {0};
 };
