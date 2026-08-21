@@ -11,11 +11,18 @@ from typing import Iterable
 
 EXPECTED_LIBRARY_NAME = "espMqttClient"
 EXPECTED_VERSION = "1.7.3"
-EXPECTED_GIT_BLOBS: dict[str, str] = {
-    "library.json": "af7fc819d491ea39b0aea3a9a9cd65bb98cc6a3d",
+
+# PlatformIO Registry may normalize package metadata in library.json, so the
+# manifest is verified semantically in verify_manifest(). Implementation
+# source/header files remain byte-exact against reviewed upstream commit
+# decfa510584c88cd1f0d24e591b92ac37d5bae2e.
+EXPECTED_SOURCE_GIT_BLOBS: dict[str, str] = {
     "src/MqttClient.cpp": "5a393ef647c2e1018718f4530c337a598b08707c",
+    "src/MqttClient.h": "eaf9d2d79727da77ab353d83eb04f860680120cb",
     "src/Outbox.h": "1dc75b4f78a1a8f75d4026e1eb428d60501166c9",
     "src/TypeDefs.h": "0f153606944b28298de8a9a21da5f18fe311479c",
+    "src/Config.h": "935f7e1f5ca9907ecbd7aa9eaf8a7f610d29066d",
+    "src/espMqttClient.h": "268251f50ad48ec2b9519834d824259dc8b57ff0",
 }
 
 
@@ -70,8 +77,8 @@ def verify_manifest(library_root: Path) -> None:
         )
 
 
-def verify_blobs(library_root: Path) -> None:
-    for relative_path, expected_sha in EXPECTED_GIT_BLOBS.items():
+def verify_source_blobs(library_root: Path) -> None:
+    for relative_path, expected_sha in EXPECTED_SOURCE_GIT_BLOBS.items():
         path = library_root / relative_path
         try:
             data = path.read_bytes()
@@ -89,7 +96,7 @@ def verify_blobs(library_root: Path) -> None:
 def verify_contract(libdeps_root: Path) -> Path:
     library_root = discover_library_root(libdeps_root)
     verify_manifest(library_root)
-    verify_blobs(library_root)
+    verify_source_blobs(library_root)
     return library_root
 
 
@@ -117,7 +124,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"library_root={library_root}")
     print(f"library_name={EXPECTED_LIBRARY_NAME}")
     print(f"library_version={EXPECTED_VERSION}")
-    for relative_path, expected_sha in EXPECTED_GIT_BLOBS.items():
+    for relative_path, expected_sha in EXPECTED_SOURCE_GIT_BLOBS.items():
         print(f"git_blob[{relative_path}]={expected_sha}")
     return 0
 
