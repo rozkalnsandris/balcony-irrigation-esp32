@@ -308,6 +308,198 @@ void test_tracked_publish_state_represents_empty_staged_and_inflight() {
   TEST_ASSERT_EQUAL_UINT16(42U, inFlight.packetId);
 }
 
+void test_tracked_subscription_arm_rejects_zero_and_second_arm() {
+  const auto idle = mqtt_runtime_policy::resetTrackedSubscriptionTracker();
+  const auto zero = mqtt_runtime_policy::armTrackedSubscription(
+      idle,
+      0U,
+      100U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedSubscriptionState::idle),
+      static_cast<std::uint8_t>(zero.state));
+  TEST_ASSERT_EQUAL_UINT16(0U, zero.packetId);
+
+  const auto armed = mqtt_runtime_policy::armTrackedSubscription(
+      idle,
+      77U,
+      100U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck),
+      static_cast<std::uint8_t>(armed.state));
+  TEST_ASSERT_EQUAL_UINT16(77U, armed.packetId);
+  TEST_ASSERT_EQUAL_UINT32(100U, armed.startedAt);
+
+  const auto second = mqtt_runtime_policy::armTrackedSubscription(
+      armed,
+      88U,
+      200U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck),
+      static_cast<std::uint8_t>(second.state));
+  TEST_ASSERT_EQUAL_UINT16(77U, second.packetId);
+  TEST_ASSERT_EQUAL_UINT32(100U, second.startedAt);
+}
+
+void test_tracked_subscription_mismatch_then_exact_qos1_ack() {
+  const std::uint8_t returnCodes[] = {0x01U};
+  auto tracker = mqtt_runtime_policy::resetTrackedSubscriptionTracker();
+  tracker = mqtt_runtime_policy::armTrackedSubscription(
+      tracker,
+      77U,
+      1000U);
+
+  const auto mismatched = mqtt_runtime_policy::applyTrackedSubscriptionAck(
+      tracker,
+      78U,
+      returnCodes,
+      1U,
+      2000U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck),
+      static_cast<std::uint8_t>(mismatched.state));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::SubscriptionAckResult::none),
+      static_cast<std::uint8_t>(mismatched.result));
+  TEST_ASSERT_EQUAL_UINT16(77U, mismatched.packetId);
+
+  const auto accepted = mqtt_runtime_policy::applyTrackedSubscriptionAck(
+      mismatched,
+      77U,
+      returnCodes,
+      1U,
+      2000U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::accepted),
+      static_cast<std::uint8_t>(accepted.state));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::SubscriptionAckResult::acceptedQos1),
+      static_cast<std::uint8_t>(accepted.result));
+}
+
+void test_tracked_subscription_timeout_latches_and_late_ack_cannot_recover() {
+  const std::uint8_t returnCodes[] = {0x01U};
+  auto tracker = mqtt_runtime_policy::resetTrackedSubscriptionTracker();
+  tracker = mqtt_runtime_policy::armTrackedSubscription(
+      tracker,
+      77U,
+      0U);
+
+  tracker = mqtt_runtime_policy::latchTrackedSubscriptionTimeout(
+      tracker,
+      6500U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::rejected),
+      static_cast<std::uint8_t>(tracker.state));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::SubscriptionAckResult::timedOut),
+      static_cast<std::uint8_t>(tracker.result));
+
+  const auto lateAck = mqtt_runtime_policy::applyTrackedSubscriptionAck(
+      tracker,
+      77U,
+      returnCodes,
+      1U,
+      6501U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::rejected),
+      static_cast<std::uint8_t>(lateAck.state));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::SubscriptionAckResult::timedOut),
+      static_cast<std::uint8_t>(lateAck.result));
+}
+
+void test_tracked_subscription_disconnect_reset_allows_restart() {
+  auto tracker = mqtt_runtime_policy::resetTrackedSubscriptionTracker();
+  tracker = mqtt_runtime_policy::armTrackedSubscription(
+      tracker,
+      77U,
+      1000U);
+
+  const auto reset = mqtt_runtime_policy::resetTrackedSubscriptionTracker();
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedSubscriptionState::idle),
+      static_cast<std::uint8_t>(reset.state));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::SubscriptionAckResult::none),
+      static_cast<std::uint8_t>(reset.result));
+  TEST_ASSERT_EQUAL_UINT16(0U, reset.packetId);
+  TEST_ASSERT_EQUAL_UINT32(0U, reset.startedAt);
+
+  const auto restarted = mqtt_runtime_policy::armTrackedSubscription(
+      reset,
+      88U,
+      2000U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(
+          mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck),
+      static_cast<std::uint8_t>(restarted.state));
+  TEST_ASSERT_EQUAL_UINT16(88U, restarted.packetId);
+  TEST_ASSERT_EQUAL_UINT32(2000U, restarted.startedAt);
+}
+
+void test_tracked_publish_staged_pid0_and_disconnect_preserve_state() {
+  auto state = mqtt_runtime_policy::stageTrackedPublishState();
+  state = mqtt_runtime_policy::recordTrackedPublishEnqueue(state, 0U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::staged),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(0U, state.packetId);
+
+  const auto afterDisconnect =
+      mqtt_runtime_policy::preserveTrackedPublishOnDisconnect(state);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::staged),
+      static_cast<std::uint8_t>(afterDisconnect.phase));
+  TEST_ASSERT_EQUAL_UINT16(0U, afterDisconnect.packetId);
+}
+
+void test_tracked_publish_disconnect_reconnect_and_old_puback_lifecycle() {
+  auto state = mqtt_runtime_policy::stageTrackedPublishState();
+  state = mqtt_runtime_policy::recordTrackedPublishEnqueue(state, 77U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::inFlight),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(77U, state.packetId);
+
+  state = mqtt_runtime_policy::preserveTrackedPublishOnDisconnect(state);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::inFlight),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(77U, state.packetId);
+
+  TEST_ASSERT_FALSE(mqtt_runtime_policy::canEnqueueTrackedPublish(
+      state.phase,
+      true,
+      0U));
+
+  state = mqtt_runtime_policy::applyTrackedPublishAck(state, 78U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::inFlight),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(77U, state.packetId);
+
+  state = mqtt_runtime_policy::applyTrackedPublishAck(state, 77U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::empty),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(0U, state.packetId);
+
+  state = mqtt_runtime_policy::applyTrackedPublishAck(state, 77U);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<std::uint8_t>(mqtt_runtime_policy::TrackedPublishPhase::empty),
+      static_cast<std::uint8_t>(state.phase));
+  TEST_ASSERT_EQUAL_UINT16(0U, state.packetId);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_valid_qos0_command_envelope_is_allowed);
@@ -337,5 +529,11 @@ int main() {
   RUN_TEST(test_tracked_publish_enqueue_requires_staged_connected_and_queue_room);
   RUN_TEST(test_tracked_publish_ack_matches_only_exact_inflight_packet);
   RUN_TEST(test_tracked_publish_state_represents_empty_staged_and_inflight);
+  RUN_TEST(test_tracked_subscription_arm_rejects_zero_and_second_arm);
+  RUN_TEST(test_tracked_subscription_mismatch_then_exact_qos1_ack);
+  RUN_TEST(test_tracked_subscription_timeout_latches_and_late_ack_cannot_recover);
+  RUN_TEST(test_tracked_subscription_disconnect_reset_allows_restart);
+  RUN_TEST(test_tracked_publish_staged_pid0_and_disconnect_preserve_state);
+  RUN_TEST(test_tracked_publish_disconnect_reconnect_and_old_puback_lifecycle);
   return UNITY_END();
 }
