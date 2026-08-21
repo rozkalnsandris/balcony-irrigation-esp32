@@ -34,11 +34,62 @@ jobs:
       - name: Run native command-safety tests
         run: pio test -e native
 
+      - name: Run deterministic renderer tests on real checkout
+        run: python scripts/test_render_mqtt_runtime_candidate.py
+
       - name: Create non-secret CI configuration
         run: cp include/secrets.example.h include/secrets.h
 
       - name: Build espMqttClient runtime adapter boundary
         run: pio run -e esp32_mqtt_runtime_adapter
+
+      - name: Install candidate-only MQTT dependencies
+        run: pio pkg install -e esp32_mqtt_runtime_candidate
+
+      - name: Verify pinned espMqttClient source contract
+        run: |
+          python scripts/check_espmqttclient_contract.py \
+            --libdeps-root .pio/libdeps/esp32_mqtt_runtime_candidate
+          test ! -d .pio/libdeps/esp32_mqtt_runtime_candidate/PubSubClient
+
+      - name: Render and build ephemeral espMqttClient candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          original="${RUNNER_TEMP}/main.cpp.original"
+          candidate_a="${RUNNER_TEMP}/mqtt-runtime-candidate-a.cpp"
+          candidate_b="${RUNNER_TEMP}/mqtt-runtime-candidate-b.cpp"
+
+          cp src/main.cpp "${original}"
+
+          restore_main() {
+            cp "${original}" src/main.cpp
+          }
+          trap restore_main EXIT
+
+          python scripts/render_mqtt_runtime_candidate.py \
+            src/main.cpp --output "${candidate_a}"
+          python scripts/render_mqtt_runtime_candidate.py \
+            src/main.cpp --output "${candidate_b}"
+
+          cmp -s "${candidate_a}" "${candidate_b}"
+          sha256sum "${candidate_a}" "${candidate_b}"
+
+          cp "${candidate_a}" src/main.cpp
+          test "$(git diff --name-only)" = "src/main.cpp"
+          ! grep -F '<PubSubClient.h>' src/main.cpp
+          ! grep -F 'PubSubClient mqtt' src/main.cpp
+
+          pio run -e esp32_mqtt_runtime_candidate
+          pio check -e esp32_mqtt_runtime_candidate_check --fail-on-defect=high
+
+          restore_main
+          trap - EXIT
+
+          cmp -s src/main.cpp "${original}"
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
 
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci
@@ -48,3 +99,8 @@ jobs:
 
       - name: Build ESP32 OTA firmware (build only)
         run: pio run -e esp32_ota
+
+      - name: Verify repository restored and clean
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
