@@ -37,6 +37,9 @@ def make_rule_fixture() -> bytes:
         "\n// R06 fixture interior\n",
         renderer.RULES[5].end,
         "\n",
+        "  uint32_t now =\n"
+        "      millis();\n",
+        "\n",
         renderer.RULES[6].start,
         "\n// R07 fixture interior\n",
         renderer.RULES[6].end,
@@ -123,6 +126,13 @@ class RendererTests(unittest.TestCase):
             rule.apply("START x START y END")
         with self.assertRaisesRegex(renderer.RenderError, "end anchor count"):
             rule.apply("START x END y END")
+
+    def test_r06_end_anchor_is_wifi_scoped_with_duplicate_now_declaration(self) -> None:
+        generic_now = "  uint32_t now =\n      millis();"
+        fixture_text = self.fixture.decode("utf-8")
+        self.assertEqual(2, fixture_text.count(generic_now))
+        self.assertEqual(1, fixture_text.count(renderer.RULES[5].end))
+        renderer.render_bytes(self.fixture)
 
     def test_r12_end_anchor_is_setup_scoped_with_duplicate_wifi_separator(self) -> None:
         generic_wifi_separator = (

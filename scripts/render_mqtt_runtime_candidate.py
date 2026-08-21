@@ -929,7 +929,7 @@ RULES: Sequence[LiteralRule | BlockRule] = (
     BlockRule(
         "R06",
         "  // Tikko zaudējām Wi-Fi.\n  if (wifiOnline) {",
-        "  uint32_t now =\n      millis();",
+        "  uint32_t now =\n      millis();\n\n  if (\n      now -\n      lastWiFiReconnectAttempt >=\n      WIFI_RECONNECT_INTERVAL_MS\n  ) {",
         R06_NEW,
     ),
     BlockRule(
