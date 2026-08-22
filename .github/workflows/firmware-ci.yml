@@ -2,6 +2,7 @@ name: firmware-ci
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches:
       - main
@@ -10,10 +11,60 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  classify:
+    name: FAST-LANE classify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
+      - name: Classify changed files
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+
+          if os.environ['EVENT_NAME'] != 'pull_request':
+              docs_only = False
+          else:
+              base = os.environ['BASE_SHA']
+              head = os.environ['HEAD_SHA']
+              if not base or not head:
+                  raise SystemExit('missing pull request base/head SHA')
+              changed = subprocess.check_output(
+                  ['git', 'diff', '--name-only', '--diff-filter=ACMRD', base, head],
+                  text=True,
+              ).splitlines()
+              if not changed:
+                  raise SystemExit('empty pull request diff')
+              docs_only = all(
+                  pathlib.PurePosixPath(path).suffix.lower() in {'.md', '.txt'}
+                  or path.startswith('docs/')
+                  for path in changed
+              )
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f"docs_only={'true' if docs_only else 'false'}\n")
+          print(f'FAST_LANE_DOCS_ONLY={str(docs_only).lower()}')
+          PY
+
+  repository-safety:
+    name: repository safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,6 +78,23 @@ jobs:
 
       - name: Check repository safety
         run: python scripts/repo_safety_check.py
+
+  build:
+    needs: [classify, repository-safety]
+    if: needs.classify.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
 
       - name: Install PlatformIO
         run: python -m pip install --disable-pip-version-check 'platformio==6.1.19'
@@ -45,3 +113,28 @@ jobs:
 
       - name: Build ESP32 OTA firmware (build only)
         run: pio run -e esp32_ota
+
+  fast-lane-merge-gate:
+    name: FAST-LANE Merge Gate
+    needs: [classify, repository-safety, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required validation results
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          SAFETY_RESULT: ${{ needs.repository-safety.result }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs_only }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CLASSIFY_RESULT" == success ]]
+          [[ "$SAFETY_RESULT" == success ]]
+          if [[ "$DOCS_ONLY" == true ]]; then
+            [[ "$BUILD_RESULT" == skipped ]]
+          else
+            [[ "$BUILD_RESULT" == success ]]
+          fi
+          echo "FAST_LANE_MERGE_GATE=PASS"
