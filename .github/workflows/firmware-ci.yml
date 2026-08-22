@@ -46,7 +46,7 @@ jobs:
               if not base or not head:
                   raise SystemExit('missing pull request base/head SHA')
               changed = subprocess.check_output(
-                  ['git', 'diff', '--name-only', '--diff-filter=ACMR', base, head],
+                  ['git', 'diff', '--name-only', '--diff-filter=ACMRD', base, head],
                   text=True,
               ).splitlines()
               if not changed:
