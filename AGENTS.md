@@ -20,6 +20,22 @@ Read `docs/FAST_LANE_V2_2.md` as the active local startup contract.
 - Merge remains explicit owner authority and never authorizes firmware activation or physical/device mutation.
 <!-- END FAST-LANE-V2.2-MANAGED -->
 
+<!-- BEGIN GITHUB-ONLY-LIVE-ALL-V1-MANAGED -->
+## GITHUB-ONLY / LIVE-ALL v1
+
+Canonical shared contract: `rozkalnsandris/ops-workflows/docs/GITHUB_ONLY_LIVE_ALL.md` with machine invariants in `policy/github-only-live-all-v1.json`.
+
+- `GITHUB-ONLY` (including `git hub only`) means fresh GitHub state, firmware/source/docs/test work, and preparation of a future activation up to but not including the first live device/broker/Home Assistant mutation.
+- Persist deferred rollout state as public-safe `[DEPLOY-QUEUE]` issues in `rozkalnsandris/ops-workflows`; chat or memory is never the queue.
+- Merge remains separately explicit. Neither `GITHUB-ONLY` nor `LIVE-ALL` authorizes merge.
+- A GitHub write whose deterministic side effect flashes/activates firmware or changes live device/broker/Home Assistant state counts as live work and must not run under `GITHUB-ONLY`.
+- Queue `READY` requires the final exact source/artifact identity, exact device/target alias, reviewed entrypoint, preflight, verification, allowed mutations/limits and no outstanding separate prerequisite owner gate.
+- `LIVE-ALL` snapshots only open `READY` items present at command start and freshly revalidates exact source/artifact/target/baseline, but it may execute only ordinary predeclared mutations that the repository-local contract already permits inside that exact authorization envelope.
+- Firmware flash/OTA, live MQTT publish/commands, Home Assistant mutation, pump/relay/physical actuation, device provisioning and credentials remain separately gated under this repository's STRICT rules and do not become ordinary implicit `LIVE-ALL` work merely because a queue item exists.
+- After any selected live mutation starts, error/ambiguity requires public-safe evidence preservation and STOP of the remaining batch; no automatic retry/rollback/cleanup/alternate flash path unless explicitly pre-authorized.
+- Firmware safety rules remain authoritative and stricter where applicable.
+<!-- END GITHUB-ONLY-LIVE-ALL-V1-MANAGED -->
+
 ## Firmware safety
 
 Preserve fail-closed pump timing/command safety, hard maximums and existing static/native tests. Never weaken runtime safety checks to make CI pass. Do not put Wi-Fi/MQTT credentials or other secrets in committed firmware source.
