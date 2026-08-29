@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   materialize:
-    if: "${{ github.event.head_commit.message == 'chore: repair C4 deterministic runtime staging' }}"
+    if: "${{ github.event.head_commit.message == 'chore: repair C4 PlatformIO section scope' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "45934a38ec39afe279cb9a8e93f65518937b94a3"
-          test "$(git rev-parse HEAD^)" = "84d6ef73d45084f3232ceab3ec9a9ffda0f62879"
+          test "$(git rev-parse HEAD^^^)" = "45934a38ec39afe279cb9a8e93f65518937b94a3"
+          test "$(git rev-parse HEAD^)" = "02aa0e597d26441eed458e20d9cf7258652ec5a0"
           test "$(git diff --name-only 45934a38ec39afe279cb9a8e93f65518937b94a3 HEAD)" = ".github/workflows/c4-materialize.yml"
           test "$(git hash-object src/main.cpp)" = "1b4fd87415cd9cce9b24eae2dd1f574aafe35fd7"
 
@@ -50,17 +50,28 @@ jobs:
           path = Path("platformio.ini")
           text = path.read_text(encoding="utf-8")
 
-          old_base = """lib_deps =\n    knolleary/PubSubClient @ 2.8.0\n"""
-          new_base = """lib_deps =\n    https://github.com/bertmelis/espMqttClient.git#decfa510584c88cd1f0d24e591b92ac37d5bae2e\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
-          if text.count(old_base) != 1:
+          base_start = text.find("[esp32_base]\n")
+          base_end = text.find("\n[env:esp32_ci]\n", base_start)
+          if base_start < 0 or base_end < 0:
+              raise SystemExit("missing esp32_base section boundary")
+          base = text[base_start:base_end]
+          old_base_dep = """lib_deps =\n    knolleary/PubSubClient @ 2.8.0\n"""
+          new_base_dep = """lib_deps =\n    https://github.com/bertmelis/espMqttClient.git#decfa510584c88cd1f0d24e591b92ac37d5bae2e\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
+          if base.count(old_base_dep) != 1:
               raise SystemExit("unexpected esp32_base PubSubClient anchor count")
-          text = text.replace(old_base, new_base, 1)
+          base = base.replace(old_base_dep, new_base_dep, 1)
+          text = text[:base_start] + base + text[base_end:]
 
-          old_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 source-only adapter boundary. The real firmware remains on PubSubClient\n; in this phase; this environment compiles the pinned espMqttClient adapter.\nlib_deps =\n    knolleary/PubSubClient @ 2.8.0\n    bertmelis/espMqttClient @ 1.7.3\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
-          new_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 adapter boundary compile using the same exact canonical espMqttClient pin.\n"""
-          if text.count(old_adapter) != 1:
-              raise SystemExit("unexpected adapter environment anchor count")
-          text = text.replace(old_adapter, new_adapter, 1)
+          adapter_start = text.find("[env:esp32_mqtt_runtime_adapter]\n")
+          adapter_end = text.find("\n[env:esp32_mqtt_runtime_candidate]\n", adapter_start)
+          if adapter_start < 0 or adapter_end < 0:
+              raise SystemExit("missing adapter section boundary")
+          adapter = text[adapter_start:adapter_end]
+          expected_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 source-only adapter boundary. The real firmware remains on PubSubClient\n; in this phase; this environment compiles the pinned espMqttClient adapter.\nlib_deps =\n    knolleary/PubSubClient @ 2.8.0\n    bertmelis/espMqttClient @ 1.7.3\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
+          replacement_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 adapter boundary compile using the same exact canonical espMqttClient pin.\n"""
+          if adapter != expected_adapter:
+              raise SystemExit("unexpected adapter environment content")
+          text = text[:adapter_start] + replacement_adapter.rstrip("\n") + text[adapter_end:]
 
           path.write_text(text, encoding="utf-8")
           PY
