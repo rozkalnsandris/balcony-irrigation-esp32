@@ -2,10 +2,19 @@
 
 #include "mqtt_runtime_adapter.h"
 
+#include <Arduino.h>
+
 #include <cstring>
 
 MqttRuntimeAdapter::MqttRuntimeAdapter()
     : espMqttClient(espMqttClientTypes::UseInternalTask::NO) {
+  _client.client.setConnectionTimeout(
+      mqtt_runtime_policy::kTcpConnectionTimeoutMs);
+
+  setKeepAlive(mqtt_runtime_policy::kKeepAliveSeconds)
+      .setTimeout(mqtt_runtime_policy::kMqttAckTimeoutSeconds)
+      .setCleanSession(true);
+
   onConnect([this](bool sessionPresent) {
     if (connectedHandler_ != nullptr) {
       connectedHandler_(sessionPresent);
@@ -14,10 +23,19 @@ MqttRuntimeAdapter::MqttRuntimeAdapter()
 
   onDisconnect([this](espMqttClientTypes::DisconnectReason reason) {
     resetAssembly();
+    resetTrackedSubscription();
     if (disconnectedHandler_ != nullptr) {
       disconnectedHandler_(reason);
     }
   });
+
+  onSubscribe(
+      [this](
+          std::uint16_t packetId,
+          const espMqttClientTypes::SubscribeReturncode* returnCodes,
+          std::size_t count) {
+        handleSubscribeAck(packetId, returnCodes, count);
+      });
 
   onMessage(
       [this](
@@ -29,6 +47,10 @@ MqttRuntimeAdapter::MqttRuntimeAdapter()
           std::size_t total) {
         handleIncoming(properties, topic, payload, len, index, total);
       });
+
+  onPublish([this](std::uint16_t packetId) {
+    handlePublishAck(packetId);
+  });
 }
 
 void MqttRuntimeAdapter::configure(
@@ -39,9 +61,6 @@ void MqttRuntimeAdapter::configure(
     const char* password,
     const char* willTopic,
     const char* willPayload) {
-  _client.client.setConnectionTimeout(
-      mqtt_runtime_policy::kTcpConnectionTimeoutMs);
-
   setServer(server, port)
       .setClientId(clientId)
       .setCredentials(username, password)
@@ -84,7 +103,34 @@ bool MqttRuntimeAdapter::startConnect() {
     return false;
   }
 
-  return connect();
+  return espMqttClient::connect();
+}
+
+bool MqttRuntimeAdapter::connectBlocking() {
+  if (!startConnect()) {
+    return false;
+  }
+
+  const std::uint32_t startedAt = millis();
+
+  while (isTransitioning() &&
+         !mqtt_runtime_policy::hasElapsed(
+             millis(),
+             startedAt,
+             mqtt_runtime_policy::kConnectAttemptBudgetMs)) {
+    espMqttClient::loop();
+    delay(1);
+  }
+
+  if (connected()) {
+    return true;
+  }
+
+  if (isTransitioning()) {
+    forceDisconnect();
+  }
+
+  return false;
 }
 
 bool MqttRuntimeAdapter::abortTransition() {
@@ -93,11 +139,41 @@ bool MqttRuntimeAdapter::abortTransition() {
   }
 
   resetAssembly();
-  return disconnect(true);
+  return forceDisconnect();
+}
+
+bool MqttRuntimeAdapter::forceDisconnect() {
+  if (disconnected()) {
+    resetAssembly();
+    resetTrackedSubscription();
+    return true;
+  }
+
+  espMqttClient::disconnect(true);
+
+  const std::uint32_t startedAt = millis();
+  while (!disconnected() &&
+         !mqtt_runtime_policy::hasElapsed(
+             millis(),
+             startedAt,
+             mqtt_runtime_policy::kDisconnectCleanupBudgetMs)) {
+    espMqttClient::loop();
+    delay(1);
+  }
+
+  resetAssembly();
+
+  if (disconnected()) {
+    resetTrackedSubscription();
+    return true;
+  }
+
+  return false;
 }
 
 void MqttRuntimeAdapter::service() {
-  loop();
+  espMqttClient::loop();
+  latchTrackedSubscriptionTimeout(millis());
 }
 
 bool MqttRuntimeAdapter::subscribeTopic(const char* topic, std::uint8_t qos) {
@@ -105,7 +181,7 @@ bool MqttRuntimeAdapter::subscribeTopic(const char* topic, std::uint8_t qos) {
     return false;
   }
 
-  return subscribe(topic, qos) != 0U;
+  return espMqttClient::subscribe(topic, qos) != 0U;
 }
 
 bool MqttRuntimeAdapter::publishMessage(
@@ -117,7 +193,157 @@ bool MqttRuntimeAdapter::publishMessage(
     return false;
   }
 
-  return publish(topic, qos, retain, payload) != 0U;
+  return espMqttClient::publish(topic, qos, retain, payload) != 0U;
+}
+
+bool MqttRuntimeAdapter::subscribeBestEffort(
+    const char* topic,
+    std::uint8_t qos) {
+  if (!connected() ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const bool accepted = espMqttClient::subscribe(topic, qos) != 0U;
+  if (accepted) {
+    espMqttClient::loop();
+  }
+
+  return accepted;
+}
+
+bool MqttRuntimeAdapter::publishBestEffort(
+    const char* topic,
+    const char* payload,
+    bool retain) {
+  if (!connected() ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const bool accepted =
+      espMqttClient::publish(topic, 0U, retain, payload) != 0U;
+  if (accepted) {
+    espMqttClient::loop();
+  }
+
+  return accepted;
+}
+
+bool MqttRuntimeAdapter::startTrackedSubscription(const char* topic) {
+  if (topic == nullptr || !connected() ||
+      trackedSubscriptionState_ !=
+          mqtt_runtime_policy::TrackedSubscriptionState::idle ||
+      !mqtt_runtime_policy::canQueueBestEffort(queueSize())) {
+    return false;
+  }
+
+  const std::uint16_t packetId = espMqttClient::subscribe(topic, 1U);
+  if (packetId == 0U) {
+    return false;
+  }
+
+  trackedSubscriptionPacketId_ = packetId;
+  trackedSubscriptionStartedAt_ = millis();
+  trackedSubscriptionFailure_ = mqtt_runtime_policy::SubscriptionAckResult::none;
+  trackedSubscriptionState_ =
+      mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck;
+
+  espMqttClient::loop();
+  latchTrackedSubscriptionTimeout(millis());
+  return true;
+}
+
+mqtt_runtime_policy::TrackedSubscriptionState
+MqttRuntimeAdapter::trackedSubscriptionState(std::uint32_t now) const {
+  latchTrackedSubscriptionTimeout(now);
+  return trackedSubscriptionState_;
+}
+
+mqtt_runtime_policy::SubscriptionAckResult
+MqttRuntimeAdapter::trackedSubscriptionFailure(std::uint32_t now) const {
+  latchTrackedSubscriptionTimeout(now);
+  return trackedSubscriptionFailure_;
+}
+
+void MqttRuntimeAdapter::resetTrackedSubscription() {
+  trackedSubscriptionState_ = mqtt_runtime_policy::TrackedSubscriptionState::idle;
+  trackedSubscriptionFailure_ = mqtt_runtime_policy::SubscriptionAckResult::none;
+  trackedSubscriptionPacketId_ = 0U;
+  trackedSubscriptionStartedAt_ = 0U;
+}
+
+bool MqttRuntimeAdapter::startTrackedPublish(
+    const char* topic,
+    const char* payload,
+    bool retain) {
+  if (trackedPublishState_.phase !=
+          mqtt_runtime_policy::TrackedPublishPhase::empty ||
+      topic == nullptr || payload == nullptr) {
+    return false;
+  }
+
+  const std::size_t topicLength = std::strlen(topic);
+  const std::size_t payloadLength = std::strlen(payload);
+
+  if (!mqtt_runtime_policy::canStoreTrackedTopic(topicLength) ||
+      !mqtt_runtime_policy::canStoreTrackedPayload(payloadLength)) {
+    return false;
+  }
+
+  std::memcpy(trackedTopic_, topic, topicLength + 1U);
+  std::memcpy(trackedPayload_, payload, payloadLength + 1U);
+
+  trackedPublishState_.phase = mqtt_runtime_policy::TrackedPublishPhase::staged;
+  trackedPublishState_.packetId = 0U;
+  trackedRetain_ = retain;
+  return true;
+}
+
+bool MqttRuntimeAdapter::pumpTrackedPublish() {
+  if (trackedPublishState_.phase ==
+      mqtt_runtime_policy::TrackedPublishPhase::empty) {
+    return false;
+  }
+
+  if (trackedPublishState_.phase ==
+      mqtt_runtime_policy::TrackedPublishPhase::inFlight) {
+    return true;
+  }
+
+  if (!mqtt_runtime_policy::canEnqueueTrackedPublish(
+          trackedPublishState_.phase,
+          connected(),
+          queueSize())) {
+    return false;
+  }
+
+  const std::uint16_t packetId =
+      espMqttClient::publish(
+          trackedTopic_,
+          1U,
+          trackedRetain_,
+          trackedPayload_);
+
+  if (packetId == 0U) {
+    return false;
+  }
+
+  trackedPublishState_.packetId = packetId;
+  trackedPublishState_.phase =
+      mqtt_runtime_policy::TrackedPublishPhase::inFlight;
+  espMqttClient::loop();
+  return true;
+}
+
+bool MqttRuntimeAdapter::trackedPublishBusy() const {
+  return trackedPublishState_.phase !=
+         mqtt_runtime_policy::TrackedPublishPhase::empty;
+}
+
+bool MqttRuntimeAdapter::trackedPublishInFlight() const {
+  return trackedPublishState_.phase ==
+         mqtt_runtime_policy::TrackedPublishPhase::inFlight;
 }
 
 void MqttRuntimeAdapter::resetAssembly() {
@@ -210,6 +436,75 @@ void MqttRuntimeAdapter::handleIncoming(
 
     resetAssembly();
   }
+}
+
+void MqttRuntimeAdapter::handleSubscribeAck(
+    std::uint16_t packetId,
+    const espMqttClientTypes::SubscribeReturncode* returnCodes,
+    std::size_t count) {
+  if (trackedSubscriptionState_ !=
+      mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck) {
+    return;
+  }
+
+  latchTrackedSubscriptionTimeout(millis());
+  if (trackedSubscriptionState_ !=
+      mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck) {
+    return;
+  }
+
+  if (packetId != trackedSubscriptionPacketId_) {
+    return;
+  }
+
+  const auto* rawReturnCodes =
+      reinterpret_cast<const std::uint8_t*>(returnCodes);
+  const mqtt_runtime_policy::SubscriptionAckResult result =
+      mqtt_runtime_policy::classifySingleSubscriptionAck(rawReturnCodes, count);
+
+  trackedSubscriptionFailure_ = result;
+  trackedSubscriptionState_ =
+      result == mqtt_runtime_policy::SubscriptionAckResult::acceptedQos1
+          ? mqtt_runtime_policy::TrackedSubscriptionState::accepted
+          : mqtt_runtime_policy::TrackedSubscriptionState::rejected;
+}
+
+void MqttRuntimeAdapter::latchTrackedSubscriptionTimeout(
+    std::uint32_t now) const {
+  if (trackedSubscriptionState_ !=
+      mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck) {
+    return;
+  }
+
+  if (!mqtt_runtime_policy::isSubscriptionAckTimedOut(
+          now,
+          trackedSubscriptionStartedAt_)) {
+    return;
+  }
+
+  trackedSubscriptionFailure_ =
+      mqtt_runtime_policy::SubscriptionAckResult::timedOut;
+  trackedSubscriptionState_ =
+      mqtt_runtime_policy::TrackedSubscriptionState::rejected;
+}
+
+void MqttRuntimeAdapter::handlePublishAck(std::uint16_t packetId) {
+  if (!mqtt_runtime_policy::trackedPublishAckMatches(
+          trackedPublishState_.phase,
+          trackedPublishState_.packetId,
+          packetId)) {
+    return;
+  }
+
+  clearTrackedPublish();
+}
+
+void MqttRuntimeAdapter::clearTrackedPublish() {
+  trackedPublishState_.phase = mqtt_runtime_policy::TrackedPublishPhase::empty;
+  trackedPublishState_.packetId = 0U;
+  trackedRetain_ = false;
+  trackedTopic_[0] = '\0';
+  trackedPayload_[0] = '\0';
 }
 
 #endif
