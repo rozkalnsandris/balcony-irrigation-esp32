@@ -92,6 +92,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -104,62 +105,72 @@ jobs:
       - name: Run native command-safety tests
         run: pio test -e native
 
-      - name: Run deterministic renderer tests on real checkout
-        run: python scripts/test_render_mqtt_runtime_candidate.py
-
-      - name: Create non-secret CI configuration
-        run: cp include/secrets.example.h include/secrets.h
-
-      - name: Build espMqttClient runtime adapter boundary
-        run: pio run -e esp32_mqtt_runtime_adapter
-
-      - name: Install candidate-only MQTT dependencies
-        run: pio pkg install -e esp32_mqtt_runtime_candidate
-
-      - name: Verify pinned espMqttClient source contract
-        run: |
-          python scripts/check_espmqttclient_contract.py \
-            --libdeps-root .pio/libdeps/esp32_mqtt_runtime_candidate
-          test ! -d .pio/libdeps/esp32_mqtt_runtime_candidate/PubSubClient
-
-      - name: Render and build ephemeral espMqttClient candidate
+      - name: Verify tracked C4 runtime provenance
         shell: bash
         run: |
           set -euo pipefail
 
-          original="${RUNNER_TEMP}/main.cpp.original"
+          historical="${RUNNER_TEMP}/main.cpp.pre-c4"
+          tracked="${RUNNER_TEMP}/main.cpp.c4"
           candidate_a="${RUNNER_TEMP}/mqtt-runtime-candidate-a.cpp"
           candidate_b="${RUNNER_TEMP}/mqtt-runtime-candidate-b.cpp"
 
-          cp src/main.cpp "${original}"
+          git show 45934a38ec39afe279cb9a8e93f65518937b94a3:src/main.cpp > "${historical}"
+          test "$(git hash-object "${historical}")" = "1b4fd87415cd9cce9b24eae2dd1f574aafe35fd7"
 
-          restore_main() {
-            cp "${original}" src/main.cpp
-          }
-          trap restore_main EXIT
+          cp src/main.cpp "${tracked}"
+          test "$(git hash-object "${tracked}")" = "b5a4b5a8bf429a1434d4fc3ae72278d6e6386f8d"
 
           python scripts/render_mqtt_runtime_candidate.py \
-            src/main.cpp --output "${candidate_a}"
+            "${historical}" --output "${candidate_a}"
           python scripts/render_mqtt_runtime_candidate.py \
-            src/main.cpp --output "${candidate_b}"
+            "${historical}" --output "${candidate_b}"
 
           cmp -s "${candidate_a}" "${candidate_b}"
-          sha256sum "${candidate_a}" "${candidate_b}"
+          cmp -s "${candidate_a}" src/main.cpp
+          test "$(sha256sum src/main.cpp | awk '{print $1}')" = \
+            "c0cfe4ffcfac6ae0f726b4d83e3a258f495666e32054c0b2ca7dddbf9eec8941"
 
-          cp "${candidate_a}" src/main.cpp
-          test "$(git diff --name-only)" = "src/main.cpp"
           ! grep -F '<PubSubClient.h>' src/main.cpp
           ! grep -F 'PubSubClient mqtt' src/main.cpp
+          ! grep -F 'knolleary/PubSubClient' platformio.ini
+          grep -F 'decfa510584c88cd1f0d24e591b92ac37d5bae2e' platformio.ini
 
-          pio run -e esp32_mqtt_runtime_candidate
-          pio check -e esp32_mqtt_runtime_candidate_check --fail-on-defect=high
+          restore_tracked() {
+            cp "${tracked}" src/main.cpp
+          }
+          trap restore_tracked EXIT
 
-          restore_main
+          cp "${historical}" src/main.cpp
+          python scripts/test_render_mqtt_runtime_candidate.py
+
+          restore_tracked
           trap - EXIT
 
-          cmp -s src/main.cpp "${original}"
+          cmp -s "${tracked}" src/main.cpp
           git diff --exit-code
           test -z "$(git status --porcelain)"
+
+      - name: Create non-secret CI configuration
+        run: cp include/secrets.example.h include/secrets.h
+
+      - name: Install canonical MQTT dependencies
+        run: pio pkg install -e esp32_ci
+
+      - name: Verify canonical pinned espMqttClient source contract
+        run: |
+          python scripts/check_espmqttclient_contract.py \
+            --libdeps-root .pio/libdeps/esp32_ci
+          test ! -d .pio/libdeps/esp32_ci/PubSubClient
+
+      - name: Build espMqttClient runtime adapter boundary
+        run: pio run -e esp32_mqtt_runtime_adapter
+
+      - name: Build tracked espMqttClient candidate environment
+        run: pio run -e esp32_mqtt_runtime_candidate
+
+      - name: Run bounded candidate Cppcheck analysis
+        run: pio check -e esp32_mqtt_runtime_candidate_check --fail-on-defect=high
 
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci

@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-#include <PubSubClient.h>
+#include "mqtt_runtime_adapter.h"
+#include <cstring>
 #include <ArduinoOTA.h>
 #include <time.h>
 
@@ -117,9 +118,38 @@ RTC_DATA_ATTR bool rtcPumpWasRunning = false;
 // TĪKLS / MQTT
 // ============================================================
 
-WiFiClient mqttNet;
-PubSubClient mqtt(mqttNet);
+MqttRuntimeAdapter mqtt;
 WiFiUDP udp;
+
+enum class MqttSessionInitState : uint8_t {
+  Idle = 0,
+  SubscribePump,
+  AwaitPumpSuback,
+  SubscribeCmd,
+  AwaitCmdSuback,
+  Online,
+  DiscoverySensors,
+  DiscoveryPump,
+  PumpStatus,
+  ConnectedLog,
+  StartupLog,
+  StartupPumpWarning,
+  WifiRestoredLog,
+  Done,
+};
+
+constexpr uint32_t MQTT_SESSION_CRITICAL_STEP_BUDGET_MS = 6500UL;
+constexpr uint32_t MQTT_DISCOVERY_WINDOW_BUDGET_MS = 6500UL;
+
+MqttSessionInitState mqttSessionInitState = MqttSessionInitState::Idle;
+uint8_t mqttDiscoverySensorIndex = 0;
+uint32_t mqttSessionStepStartedAt = 0;
+uint32_t mqttDiscoveryWindowStartedAt = 0;
+uint32_t oversizedTelegramDrops = 0;
+
+bool mqttSessionReady() {
+  return mqttSessionInitState == MqttSessionInitState::Done;
+}
 
 char mqttClientId[48] = {0};
 
@@ -478,54 +508,107 @@ void enqueueTelegramMessage(const String& msg) {
   telegramQueueCount++;
 }
 
-bool publishTelegramNow(const String& msg) {
+bool telegramPayloadAllowed(const String& msg) {
+  return mqtt_runtime_policy::canStoreTrackedPayload(msg.length());
+}
 
-  if (!mqtt.connected()) {
-    return false;
-  }
+void dropOversizedTelegramMessage(const String& msg) {
+  oversizedTelegramDrops++;
 
-  return mqtt.publish(
-    T_OUT,
-    msg.c_str()
+  Serial.printf(
+    "BRĪDINĀJUMS: Telegram ziņa par garu (%u > %u baiti)\n",
+    static_cast<unsigned int>(msg.length()),
+    static_cast<unsigned int>(
+      mqtt_runtime_policy::kTrackedPayloadTextMaxBytes
+    )
   );
 }
 
 void tgSend(const String& msg) {
 
-  if (publishTelegramNow(msg)) {
+  if (!telegramPayloadAllowed(msg)) {
+    dropOversizedTelegramMessage(msg);
+    return;
+  }
+
+  // Adaptera fixed copy ir lokāls staging solis. Ja session init vēl nav
+  // pabeigts, jauns network PUBLISH netiks sūknēts līdz Done stāvoklim.
+  if (
+      !mqtt.trackedPublishBusy() &&
+      mqtt.startTrackedPublish(
+        T_OUT,
+        msg.c_str()
+      )
+  ) {
     return;
   }
 
   enqueueTelegramMessage(msg);
 }
 
-void flushTelegramQueue() {
+void serviceTelegramDelivery() {
 
-  while (
-      mqtt.connected() &&
-      telegramQueueCount > 0
-  ) {
+  if (!mqttSessionReady()) {
+    return;
+  }
 
-    String msg =
-        telegramQueue[telegramQueueHead];
+  if (mqtt.trackedPublishBusy()) {
+    mqtt.pumpTrackedPublish();
+    return;
+  }
 
-    if (!publishTelegramNow(msg)) {
-      break;
-    }
+  if (telegramQueueCount == 0) {
+    return;
+  }
+
+  String msg =
+      telegramQueue[telegramQueueHead];
+
+  if (!telegramPayloadAllowed(msg)) {
+    dropOversizedTelegramMessage(msg);
 
     telegramQueue[telegramQueueHead] = "";
-
     telegramQueueHead =
         (telegramQueueHead + 1) %
         TELEGRAM_QUEUE_SIZE;
-
     telegramQueueCount--;
+    return;
   }
+
+  if (
+      !mqtt.startTrackedPublish(
+        T_OUT,
+        msg.c_str()
+      )
+  ) {
+    return;
+  }
+
+  // No šī brīža adapterim pieder fixed copy; app queue head drīkst atbrīvot.
+  telegramQueue[telegramQueueHead] = "";
+  telegramQueueHead =
+      (telegramQueueHead + 1) %
+      TELEGRAM_QUEUE_SIZE;
+  telegramQueueCount--;
+
+  // Vienā izsaukumā maksimums viens jauns network PUBLISH mēģinājums.
+  mqtt.pumpTrackedPublish();
 }
 
 // ============================================================
 // LOGI
 // ============================================================
+
+bool mqttDiagnosticPublishAllowed() {
+  if (!mqtt.isConnected()) {
+    return false;
+  }
+
+  return mqttSessionReady() ||
+         mqttSessionInitState == MqttSessionInitState::ConnectedLog ||
+         mqttSessionInitState == MqttSessionInitState::StartupLog ||
+         mqttSessionInitState == MqttSessionInitState::WifiRestoredLog;
+}
 
 void logEvent(const String& msg) {
 
@@ -539,10 +622,11 @@ void logEvent(const String& msg) {
     line
   );
 
-  if (mqtt.connected()) {
-    mqtt.publish(
+  if (mqttDiagnosticPublishAllowed()) {
+    mqtt.publishBestEffort(
       T_LOG,
-      line.c_str()
+      line.c_str(),
+      false
     );
   }
 
@@ -553,13 +637,20 @@ void logEvent(const String& msg) {
 // SŪKŅA VADĪBA
 // ============================================================
 
-void publishPumpStatus() {
+bool publishPumpStatus() {
 
-  if (!mqtt.connected()) {
-    return;
+  if (!mqtt.isConnected()) {
+    return false;
   }
 
-  mqtt.publish(
+  if (
+      !mqttSessionReady() &&
+      mqttSessionInitState != MqttSessionInitState::PumpStatus
+  ) {
+    return false;
+  }
+
+  return mqtt.publishBestEffort(
     T_PUMP_ST,
     pumpRunning ? "ON" : "OFF",
     true
@@ -806,8 +897,8 @@ void serviceUrgentPumpStop() {
 // un tūlīt pēc mqtt.loop() atgriešanās pabeigt stop reconciliāciju.
 void servicePumpCriticalNetworkInput() {
 
-  if (mqtt.connected()) {
-    mqtt.loop();
+  if (!mqtt.isDisconnected()) {
+    mqtt.service();
   }
 
   serviceUrgentPumpStop();
@@ -1008,7 +1099,9 @@ void serviceWiFi() {
 
     wifiOnline = false;
 
-    mqttNet.stop();
+    // Pieprasām bounded adapter cleanup. Ja 250 ms logā tas vēl nav
+    // termināls, serviceMQTT() turpinās service() arī ar Wi-Fi down.
+    mqtt.forceDisconnect();
 
     Serial.println(
       "WiFi savienojums pazudis"
@@ -1277,59 +1370,54 @@ bool dequeueCommand(
 // HOME ASSISTANT DISCOVERY
 // ============================================================
 
-void sendDiscovery() {
+bool publishDiscoverySensor(uint8_t sensor) {
 
   char topic[96];
   char payload[600];
 
-  for (
-      int sensor = 0;
-      sensor < SENSOR_COUNT;
-      sensor++
-  ) {
+  snprintf(
+    topic,
+    sizeof(topic),
+    "homeassistant/sensor/"
+    "balkons_puke%d/config",
+    sensor + 1
+  );
 
-    snprintf(
-      topic,
-      sizeof(topic),
-      "homeassistant/sensor/"
-      "balkons_puke%d/config",
-      sensor + 1
-    );
+  snprintf(
+    payload,
+    sizeof(payload),
 
-    snprintf(
-      payload,
-      sizeof(payload),
+    "{"
+    "\"name\":\"Puķe %d\","
+    "\"stat_t\":\"balkons/puke%d/mitrums\","
+    "\"exp_aft\":180,"
+    "\"icon\":\"mdi:flower\","
+    "\"uniq_id\":\"balkons_puke%d\","
+    "\"avty_t\":\"balkons/status\","
+    "\"dev\":{"
+      "\"ids\":[\"balkons_esp32\"],"
+      "\"name\":\"Balkona Laistīšana\","
+      "\"mf\":\"Andris\","
+      "\"mdl\":\"ESP32\""
+    "}"
+    "}",
 
-      "{"
-      "\"name\":\"Puķe %d\","
-      "\"stat_t\":\"balkons/puke%d/mitrums\","
-      "\"exp_aft\":180,"
-      "\"icon\":\"mdi:flower\","
-      "\"uniq_id\":\"balkons_puke%d\","
-      "\"avty_t\":\"balkons/status\","
-      "\"dev\":{"
-        "\"ids\":[\"balkons_esp32\"],"
-        "\"name\":\"Balkona Laistīšana\","
-        "\"mf\":\"Andris\","
-        "\"mdl\":\"ESP32\""
-      "}"
-      "}",
+    sensor + 1,
+    sensor + 1,
+    sensor + 1
+  );
 
-      sensor + 1,
-      sensor + 1,
-      sensor + 1
-    );
+  return mqtt.publishBestEffort(
+    topic,
+    payload,
+    true
+  );
+}
 
-    mqtt.publish(
-      topic,
-      payload,
-      true
-    );
+bool publishDiscoveryPump() {
 
-    feedWatchdog();
-
-    delay(10);
-  }
+  char topic[96];
+  char payload[600];
 
   snprintf(
     topic,
@@ -1360,47 +1448,328 @@ void sendDiscovery() {
     "}"
   );
 
-  mqtt.publish(
+  return mqtt.publishBestEffort(
     topic,
     payload,
     true
   );
+}
 
-  Serial.println(
-    "MQTT discovery nosūtīts"
-  );
+void resetMqttSessionInit() {
+  mqttSessionInitState = MqttSessionInitState::Idle;
+  mqttDiscoverySensorIndex = 0;
+  mqttSessionStepStartedAt = 0;
+  mqttDiscoveryWindowStartedAt = 0;
+  mqtt.resetTrackedSubscription();
+}
+
+void mqttConnectedHandler(bool sessionPresent) {
+  (void)sessionPresent;
+
+  mqtt.resetTrackedSubscription();
+  mqttDiscoverySensorIndex = 0;
+  mqttSessionStepStartedAt = millis();
+  mqttDiscoveryWindowStartedAt = 0;
+  mqttSessionInitState = MqttSessionInitState::SubscribePump;
+}
+
+void mqttDisconnectedHandler(espMqttClientTypes::DisconnectReason reason) {
+  (void)reason;
+  resetMqttSessionInit();
+}
+
+void handleCriticalMqttSessionInitFailure() {
+  // Ja pump jau darbojas un connected command path vēl ir pieejams,
+  // to netear-downojam. Pēc pump OFF nākamais loop drīkst cleanup/reconnect.
+  if (pumpRunning) {
+    return;
+  }
+
+  mqtt.forceDisconnect();
+}
+
+void serviceMqttSessionInit() {
+
+  if (
+      !mqtt.isConnected() ||
+      mqttSessionInitState == MqttSessionInitState::Idle ||
+      mqttSessionInitState == MqttSessionInitState::Done
+  ) {
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  switch (mqttSessionInitState) {
+
+    case MqttSessionInitState::SubscribePump:
+      if (mqtt.startTrackedSubscription(T_PUMP_CMD)) {
+        mqttSessionInitState = MqttSessionInitState::AwaitPumpSuback;
+        mqttSessionStepStartedAt = now;
+        return;
+      }
+
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttSessionStepStartedAt,
+            MQTT_SESSION_CRITICAL_STEP_BUDGET_MS
+          )
+      ) {
+        handleCriticalMqttSessionInitFailure();
+      }
+      return;
+
+    case MqttSessionInitState::AwaitPumpSuback: {
+      const auto state = mqtt.trackedSubscriptionState(now);
+
+      if (state == mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck) {
+        return;
+      }
+
+      if (state != mqtt_runtime_policy::TrackedSubscriptionState::accepted) {
+        handleCriticalMqttSessionInitFailure();
+        return;
+      }
+
+      mqtt.resetTrackedSubscription();
+      mqttSessionInitState = MqttSessionInitState::SubscribeCmd;
+      mqttSessionStepStartedAt = now;
+      return;
+    }
+
+    case MqttSessionInitState::SubscribeCmd:
+      if (mqtt.startTrackedSubscription(T_CMD)) {
+        mqttSessionInitState = MqttSessionInitState::AwaitCmdSuback;
+        mqttSessionStepStartedAt = now;
+        return;
+      }
+
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttSessionStepStartedAt,
+            MQTT_SESSION_CRITICAL_STEP_BUDGET_MS
+          )
+      ) {
+        handleCriticalMqttSessionInitFailure();
+      }
+      return;
+
+    case MqttSessionInitState::AwaitCmdSuback: {
+      const auto state = mqtt.trackedSubscriptionState(now);
+
+      if (state == mqtt_runtime_policy::TrackedSubscriptionState::awaitingAck) {
+        return;
+      }
+
+      if (state != mqtt_runtime_policy::TrackedSubscriptionState::accepted) {
+        handleCriticalMqttSessionInitFailure();
+        return;
+      }
+
+      mqtt.resetTrackedSubscription();
+      mqttSessionInitState = MqttSessionInitState::Online;
+      mqttSessionStepStartedAt = now;
+      return;
+    }
+
+    case MqttSessionInitState::Online:
+      if (
+          mqtt.publishBestEffort(
+            T_STATUS,
+            "online",
+            true
+          )
+      ) {
+        mqttSessionInitState = MqttSessionInitState::DiscoverySensors;
+        mqttDiscoverySensorIndex = 0;
+        mqttDiscoveryWindowStartedAt = now;
+        return;
+      }
+
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttSessionStepStartedAt,
+            MQTT_SESSION_CRITICAL_STEP_BUDGET_MS
+          )
+      ) {
+        handleCriticalMqttSessionInitFailure();
+      }
+      return;
+
+    case MqttSessionInitState::DiscoverySensors:
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttDiscoveryWindowStartedAt,
+            MQTT_DISCOVERY_WINDOW_BUDGET_MS
+          )
+      ) {
+        Serial.println(
+          "MQTT discovery logs izsmelts — atlikusī sensoru discovery izlaista"
+        );
+        mqttSessionInitState = MqttSessionInitState::DiscoveryPump;
+        return;
+      }
+
+      if (mqttDiscoverySensorIndex >= SENSOR_COUNT) {
+        mqttSessionInitState = MqttSessionInitState::DiscoveryPump;
+        return;
+      }
+
+      if (publishDiscoverySensor(mqttDiscoverySensorIndex)) {
+        mqttDiscoverySensorIndex++;
+      }
+      return;
+
+    case MqttSessionInitState::DiscoveryPump:
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttDiscoveryWindowStartedAt,
+            MQTT_DISCOVERY_WINDOW_BUDGET_MS
+          ) ||
+          publishDiscoveryPump()
+      ) {
+        mqttSessionInitState = MqttSessionInitState::PumpStatus;
+        mqttSessionStepStartedAt = now;
+      }
+      return;
+
+    case MqttSessionInitState::PumpStatus:
+      if (publishPumpStatus()) {
+        mqttSessionInitState = MqttSessionInitState::ConnectedLog;
+        return;
+      }
+
+      if (
+          mqtt_runtime_policy::hasElapsed(
+            now,
+            mqttSessionStepStartedAt,
+            MQTT_SESSION_CRITICAL_STEP_BUDGET_MS
+          )
+      ) {
+        handleCriticalMqttSessionInitFailure();
+      }
+      return;
+
+    case MqttSessionInitState::ConnectedLog:
+      logEvent("MQTT savienots");
+      mqttSessionInitState = MqttSessionInitState::StartupLog;
+      return;
+
+    case MqttSessionInitState::StartupLog:
+      if (startupLogPending) {
+        startupLogPending = false;
+
+        logEvent(
+          "Sistēma startēja — "
+          "restarta iemesls: " +
+          resetReasonStr() +
+          ", brīvā atmiņa: " +
+          String(
+            ESP.getFreeHeap() /
+            1024
+          ) +
+          " KB, firmware: " +
+          String(FIRMWARE_GIT_REV)
+        );
+      }
+
+      mqttSessionInitState = MqttSessionInitState::StartupPumpWarning;
+      return;
+
+    case MqttSessionInitState::StartupPumpWarning:
+      if (pumpWasRunningAtBoot) {
+        tgSend(
+          "⚠️ Sistēma restartējās "
+          "laistīšanas laikā. "
+          "Sūknis TAGAD ir izslēgts. "
+          "Pārbaudi manuāli, ja šaubies."
+        );
+
+        pumpWasRunningAtBoot = false;
+      }
+
+      mqttSessionInitState = MqttSessionInitState::WifiRestoredLog;
+      return;
+
+    case MqttSessionInitState::WifiRestoredLog:
+      if (pendingWiFiRestoredLog) {
+        pendingWiFiRestoredLog = false;
+
+        logEvent(
+          "WiFi ATJAUNOTS pēc pazušanas, "
+          "IP: " +
+          WiFi.localIP().toString() +
+          ", signāls: " +
+          String(
+            WiFi.RSSI()
+          ) +
+          " dBm"
+        );
+      }
+
+      // Ready nav atkarīgs no Telegram PUBACK. Jauns Telegram network
+      // enqueue un periodiskais moisture sākas tikai pēc šīs pārejas.
+      mqttSessionInitState = MqttSessionInitState::Done;
+      lastMqttPublish =
+          millis() -
+          MQTT_PUBLISH_INTERVAL_MS;
+      return;
+
+    case MqttSessionInitState::Idle:
+    case MqttSessionInitState::Done:
+      return;
+  }
 }
 
 // ============================================================
 // MQTT
 // ============================================================
 
-void mqttCallback(
-  char* topic,
-  byte* payload,
-  unsigned int length
+bool isCommandTrimChar(char value) {
+  return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+void trimCommandBuffer(char* command, std::size_t& length) {
+  std::size_t first = 0;
+
+  while (first < length && isCommandTrimChar(command[first])) {
+    first++;
+  }
+
+  std::size_t last = length;
+  while (last > first && isCommandTrimChar(command[last - 1U])) {
+    last--;
+  }
+
+  const std::size_t trimmedLength = last - first;
+  if (first > 0U && trimmedLength > 0U) {
+    std::memmove(command, command + first, trimmedLength);
+  }
+
+  length = trimmedLength;
+  command[length] = '\0';
+}
+
+void mqttMessageHandler(
+  const char* topic,
+  const std::uint8_t* payload,
+  std::size_t length,
+  const mqtt_runtime_policy::InboundMetadata& metadata
 ) {
+  (void)metadata;
 
   bool fromHA = false;
   bool recognizedTopic = false;
 
-  if (
-      strcmp(
-        topic,
-        T_PUMP_CMD
-      ) == 0
-  ) {
-
+  if (strcmp(topic, T_PUMP_CMD) == 0) {
     fromHA = true;
     recognizedTopic = true;
-
-  } else if (
-      strcmp(
-        topic,
-        T_CMD
-      ) == 0
-  ) {
-
+  } else if (strcmp(topic, T_CMD) == 0) {
     recognizedTopic = true;
   }
 
@@ -1408,64 +1777,51 @@ void mqttCallback(
     return;
   }
 
-  // Komandu kontrakts ir ļoti mazs. Pārāk lielu payload atmetam
-  // pirms dinamiska String allocation/copy, neizsaucot MQTT publish/log
-  // callback kontekstā.
   if (
       !command_payload_policy::isCommandPayloadLengthAllowed(
         length
       )
   ) {
-
     oversizedCommandDrops++;
-
-    Serial.printf(
-      "BRĪDINĀJUMS: MQTT komanda par garu (%u > %u baiti)\n",
-      length,
-      static_cast<unsigned int>(
-        command_payload_policy::kMaxCommandPayloadBytes
-      )
-    );
-
     return;
   }
 
-  String message;
+  char command[command_payload_policy::kMaxCommandPayloadBytes + 1U] = {0};
 
-  message.reserve(
-    length
-  );
-
-  for (
-      unsigned int i = 0;
-      i < length;
-      i++
-  ) {
-    message +=
-        static_cast<char>(
-          payload[i]
-        );
+  if (length > 0U) {
+    std::memcpy(command, payload, length);
   }
+  command[length] = '\0';
 
-  message.trim();
+  trimCommandBuffer(command, length);
 
+  // Urgent STOP/OFF tiek pārbaudīts uz fixed buffer pirms dinamiska String.
   if (
       command_safety::isUrgentStop(
         fromHA,
-        message.c_str()
+        command
       )
   ) {
-
-    requestUrgentPumpStop(
-      fromHA
-    );
-
+    requestUrgentPumpStop(fromHA);
     return;
   }
 
-  enqueueCommand(
-    fromHA,
-    message
+  String message(command);
+  enqueueCommand(fromHA, message);
+}
+
+void mqttRejectedHandler(
+  mqtt_runtime_policy::RejectReason reason,
+  std::size_t totalBytes
+) {
+  if (reason == mqtt_runtime_policy::RejectReason::oversized) {
+    oversizedCommandDrops++;
+  }
+
+  Serial.printf(
+    "BRĪDINĀJUMS: MQTT komanda atmesta adapterī (reason=%u, len=%u)\n",
+    static_cast<unsigned int>(reason),
+    static_cast<unsigned int>(totalBytes)
   );
 }
 
@@ -1521,14 +1877,9 @@ void handleDeferredSystemLogs() {
 void connectMQTT() {
 
   if (
-      WiFi.status() !=
-      WL_CONNECTED
-  ) {
-    return;
-  }
-
-  if (
-      mqtt.connected()
+      WiFi.status() != WL_CONNECTED ||
+      pumpRunning ||
+      !mqtt.isDisconnected()
   ) {
     return;
   }
@@ -1537,117 +1888,71 @@ void connectMQTT() {
     "Mēģinu pieslēgt MQTT..."
   );
 
-  bool connected =
-      mqtt.connect(
-        mqttClientId,
-        MQTT_USERNAME,
-        MQTT_PASSWORD,
-        T_STATUS,
-        0,
-        true,
-        "offline"
-      );
-
-  if (connected) {
-
+  if (mqtt.connectBlocking()) {
     Serial.println(
-      "MQTT savienots!"
+      "MQTT transports savienots; gaidu broker-confirmētu session init"
     );
+    return;
+  }
 
-    mqtt.publish(
-      T_STATUS,
-      "online",
-      true
+  static uint32_t lastFailLog = 0;
+
+  Serial.println(
+    "MQTT savienojums neizdevās"
+  );
+
+  if (
+      millis() -
+      lastFailLog >=
+      60000UL
+  ) {
+    lastFailLog = millis();
+
+    sendSyslog(
+      "MQTT savienojums NEIZDEVĀS"
     );
-
-    // PubSubClient var abonēt ar QoS 1.
-    mqtt.subscribe(
-      T_PUMP_CMD,
-      1
-    );
-
-    mqtt.subscribe(
-      T_CMD,
-      1
-    );
-
-    sendDiscovery();
-
-    publishPumpStatus();
-
-    logEvent(
-      "MQTT savienots"
-    );
-
-    // Pēc reconnect uzreiz ļaujam
-    // nosūtīt aktuālos sensoru datus.
-    lastMqttPublish =
-        millis() -
-        MQTT_PUBLISH_INTERVAL_MS;
-
-    handleDeferredSystemLogs();
-
-    // Nosūtām Telegram ziņas,
-    // kas gaidīja MQTT atjaunošanos.
-    flushTelegramQueue();
-
-  } else {
-
-    static uint32_t lastFailLog = 0;
-
-    int state =
-        mqtt.state();
-
-    Serial.println(
-      "MQTT neizdevās, rc=" +
-      String(state)
-    );
-
-    if (
-        millis() -
-        lastFailLog >=
-        60000UL
-    ) {
-
-      lastFailLog =
-          millis();
-
-      // MQTT pats nav pieejams,
-      // bet syslog caur UDP vēl var strādāt.
-      logEvent(
-        "MQTT savienojums NEIZDEVĀS, rc=" +
-        String(state)
-      );
-    }
   }
 }
 
 void serviceMQTT() {
 
-  bool wifiConnected =
+  const bool wifiConnected =
       WiFi.status() ==
       WL_CONNECTED;
 
-  bool mqttConnected =
-      mqtt.connected();
+  const bool mqttConnected =
+      mqtt.isConnected();
 
   if (!wifiConnected) {
+    if (!mqtt.isDisconnected()) {
+      mqtt.service();
+    }
     return;
   }
 
   if (mqttConnected) {
-
-    mqtt.loop();
-
+    mqtt.service();
+    serviceMqttSessionInit();
     return;
   }
 
-  uint32_t now =
-      millis();
+  if (mqtt.isTransitioning()) {
+    mqtt.service();
 
-  // Ja sūknis darbojas, jaunu TCP/MQTT reconnect nemaz nesākam.
-  // Esošu veselīgu MQTT sesiju turpinām apkalpot augstāk ar mqtt.loop(),
-  // lai urgent STOP/OFF joprojām var pienākt nekavējoties.
+    if (
+        mqtt_runtime_policy::shouldAbortTransitionalConnection(
+          pumpRunning,
+          mqtt.isConnected(),
+          mqtt.isDisconnected()
+        )
+    ) {
+      mqtt.abortTransition();
+    }
+    return;
+  }
+
+  const uint32_t now = millis();
+
   if (
       !network_policy::shouldAttemptMqttReconnect(
         wifiConnected,
@@ -1661,13 +1966,7 @@ void serviceMQTT() {
     return;
   }
 
-  lastMqttReconnectAttempt =
-      now;
-
-  // Reconnect notiek tikai ar sūkni OFF. TCP connect ir 1 s limits;
-  // PubSubClient MQTT atbildes logs paliek 2 s, tātad viena OFF-state
-  // reconnect mēģinājuma nominālā augšējā robeža ir ~3 s plus neliels
-  // scheduler/tīkla overhead. Pump-running laikā šis ceļš netiek sākts.
+  lastMqttReconnectAttempt = now;
   connectMQTT();
 }
 
@@ -1678,7 +1977,8 @@ void serviceMQTT() {
 void publishMoisture() {
 
   if (
-      !mqtt.connected()
+      !mqttSessionReady() ||
+      !mqtt.isConnected()
   ) {
     return;
   }
@@ -1717,13 +2017,13 @@ void publishMoisture() {
       sensor + 1
     );
 
-    mqtt.publish(
+    // QoS0 telemetry ir best-effort. Queue pressure nozīmē drop, ne retry burst.
+    mqtt.publishBestEffort(
       topic,
-      category.c_str()
+      category.c_str(),
+      false
     );
 
-    // Sensora lasīšanas laikā arī pārbaudām
-    // sūkņa lokālo taimeri.
     servicePump();
   }
 
@@ -2440,31 +2740,30 @@ void setup() {
   // MQTT
   // ----------------------------------------------------------
 
-  // Arduino-ESP32 NetworkClient noklusējums ir 3000 ms.
-  // Mūsu lokālajam brokerim to skaidri ierobežojam līdz 1000 ms.
-  mqttNet.setConnectionTimeout(
-    MQTT_TCP_CONNECT_TIMEOUT_MS
-  );
-
-  mqtt.setServer(
+  mqtt.configure(
     MQTT_SERVER,
-    MQTT_PORT
+    MQTT_PORT,
+    mqttClientId,
+    MQTT_USERNAME,
+    MQTT_PASSWORD,
+    T_STATUS,
+    "offline"
   );
 
-  mqtt.setBufferSize(
-    MQTT_BUFFER_SIZE
+  mqtt.setConnectedHandler(
+    mqttConnectedHandler
   );
 
-  mqtt.setKeepAlive(
-    MQTT_KEEPALIVE_S
+  mqtt.setDisconnectedHandler(
+    mqttDisconnectedHandler
   );
 
-  mqtt.setSocketTimeout(
-    MQTT_SOCKET_TIMEOUT_S
+  mqtt.setMessageHandler(
+    mqttMessageHandler
   );
 
-  mqtt.setCallback(
-    mqttCallback
+  mqtt.setRejectedHandler(
+    mqttRejectedHandler
   );
 
   // ----------------------------------------------------------
@@ -2575,16 +2874,11 @@ void loop() {
   }
 
   // ----------------------------------------------------------
-  // Ja MQTT ir atgriezies, mēģinām iztukšot
-  // atlikušās Telegram ziņas.
+  // Pēc application session Ready apkalpojam vienu bounded Telegram soli.
   // ----------------------------------------------------------
 
-  if (
-      mqtt.connected() &&
-      telegramQueueCount > 0
-  ) {
-
-    flushTelegramQueue();
+  if (mqttSessionReady()) {
+    serviceTelegramDelivery();
   }
 
   // Īss yield sistēmas taskiem.
