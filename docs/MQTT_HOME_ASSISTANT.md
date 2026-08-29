@@ -26,12 +26,16 @@ ESP32 publicē 15 sensorus un vienu sūkņa switch zem `homeassistant/.../config
 
 Discovery payloadi ir retained; availability tiek publicēta `balkons/status`, ieskaitot MQTT Last Will `offline`.
 
+Sūkņa switch discovery explicit nosaka `qos: 1` komandu publicēšanai. ESP32 arī pieprasa QoS1 subscription un application-ready stāvokli sasniedz tikai pēc broker-confirmēta QoS1 SUBACK. MQTT faktiskais piegādes QoS ir zemākais no publisher un subscription QoS, tāpēc abas puses ir jānorāda, ja HA → broker → ESP32 komandām paredzēts QoS1.
+
+QoS1 nozīmē **at least once**, nevis exactly once. `ON`, `laist` un `laist_N` joprojām ir duplicate-sensitive; QoS1 pats par sevi neveido application-level idempotency. Drošības invarianti paliek urgent `OFF`/`stop`, stale-start suppression un lokālais 180 s hard-limit.
+
 Svarīga semantika: HA `ON` pašreizējā firmware sāk sūkni ar firmware maksimālo limitu (180 s), nevis ar 30 s noklusējumu. Lokālais hard-limit tik un tā izslēdz sūkni. Šī uzvedība bootstrap auditā nav klusām mainīta.
 
 ## Teksta komandas
 
 - `laist` — sāk 30 s vai pagarina aktīvo sesiju par 30 s;
-- `laist_X` — `X` minūtes, bet ne vairāk par firmware 3 min limitu;
+- `laist_X` — `X` ir strict pozitīvs decimāls minūšu skaits, bet ne vairāk par firmware 3 min limitu; suffix, zīmes un whitespace nav derīgi;
 - `stop` — manuāli OFF;
 - `mitrums` — sensoru kategoriju pārskats;
 - `raw` — RAW ADC pārskats;

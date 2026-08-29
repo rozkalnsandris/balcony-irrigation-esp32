@@ -105,21 +105,26 @@ jobs:
       - name: Run native command-safety tests
         run: pio test -e native
 
-      - name: Verify tracked C4 runtime provenance
+      - name: Verify frozen C4 runtime provenance
         shell: bash
         run: |
           set -euo pipefail
 
           historical="${RUNNER_TEMP}/main.cpp.pre-c4"
-          tracked="${RUNNER_TEMP}/main.cpp.c4"
+          c4="${RUNNER_TEMP}/main.cpp.c4"
+          tracked="${RUNNER_TEMP}/main.cpp.current"
           candidate_a="${RUNNER_TEMP}/mqtt-runtime-candidate-a.cpp"
           candidate_b="${RUNNER_TEMP}/mqtt-runtime-candidate-b.cpp"
 
           git show 45934a38ec39afe279cb9a8e93f65518937b94a3:src/main.cpp > "${historical}"
           test "$(git hash-object "${historical}")" = "1b4fd87415cd9cce9b24eae2dd1f574aafe35fd7"
 
+          git show d7df597f8208da97f82c92a5b9494c587019fbbb:src/main.cpp > "${c4}"
+          test "$(git hash-object "${c4}")" = "b5a4b5a8bf429a1434d4fc3ae72278d6e6386f8d"
+          test "$(sha256sum "${c4}" | awk '{print $1}')" = \
+            "c0cfe4ffcfac6ae0f726b4d83e3a258f495666e32054c0b2ca7dddbf9eec8941"
+
           cp src/main.cpp "${tracked}"
-          test "$(git hash-object "${tracked}")" = "b5a4b5a8bf429a1434d4fc3ae72278d6e6386f8d"
 
           python scripts/render_mqtt_runtime_candidate.py \
             "${historical}" --output "${candidate_a}"
@@ -127,9 +132,7 @@ jobs:
             "${historical}" --output "${candidate_b}"
 
           cmp -s "${candidate_a}" "${candidate_b}"
-          cmp -s "${candidate_a}" src/main.cpp
-          test "$(sha256sum src/main.cpp | awk '{print $1}')" = \
-            "c0cfe4ffcfac6ae0f726b4d83e3a258f495666e32054c0b2ca7dddbf9eec8941"
+          cmp -s "${candidate_a}" "${c4}"
 
           ! grep -F '<PubSubClient.h>' src/main.cpp
           ! grep -F 'PubSubClient mqtt' src/main.cpp
@@ -162,6 +165,11 @@ jobs:
           python scripts/check_espmqttclient_contract.py \
             --libdeps-root .pio/libdeps/esp32_ci
           test ! -d .pio/libdeps/esp32_ci/PubSubClient
+
+      - name: Verify pinned Arduino transport and OTA source contract
+        run: |
+          python scripts/check_arduino_runtime_contract.py \
+            --packages-root "${HOME}/.platformio/packages"
 
       - name: Build espMqttClient runtime adapter boundary
         run: pio run -e esp32_mqtt_runtime_adapter

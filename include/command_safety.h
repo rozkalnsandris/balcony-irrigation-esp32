@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -39,6 +40,18 @@ inline bool shouldSuppressQueuedPumpStart(
     bool fromHA,
     const char* payload) {
   return queuedStopEpoch != currentStopEpoch &&
+         isPumpStartCommand(fromHA, payload);
+}
+
+inline bool shouldDeferQueuedPumpStartForNetwork(
+    bool pumpRunning,
+    bool mqttReady,
+    std::size_t pendingPackets,
+    bool trackedPublishBusy,
+    bool fromHA,
+    const char* payload) {
+  return !pumpRunning &&
+         (!mqttReady || pendingPackets > 0U || trackedPublishBusy) &&
          isPumpStartCommand(fromHA, payload);
 }
 
