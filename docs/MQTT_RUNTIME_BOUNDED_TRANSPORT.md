@@ -64,6 +64,37 @@ The later `main.cpp` integration must check/structure the connected-session burs
 one failed queue attempt does not become an unbounded retry loop and urgent STOP
 servicing remains interleaved.
 
+## Broker-confirmed command subscriptions
+
+The future connected-session initializer must not publish retained `online` merely
+because the MQTT transport reached CONNACK. Both command subscriptions must first be
+confirmed by broker SUBACK.
+
+The adapter therefore owns one sequential tracked-subscription slot:
+
+- the requested QoS is fixed to QoS1;
+- the SUBSCRIBE must return a nonzero packet ID before the tracker becomes active;
+- only the matching packet ID may resolve the tracker;
+- the SUBACK payload must contain exactly one return code;
+- only granted QoS1 (`0x01`) is accepted;
+- granted QoS0, granted QoS2, broker failure (`0x80`), unknown values, null payload,
+  or any return-code count other than one are rejected fail-closed;
+- an unrelated/stale packet ID is ignored;
+- the overall SUBACK budget is 6500 ms and uses wrap-safe unsigned time arithmetic.
+
+The 6500 ms deadline is **latched**. At 6499 ms a matching QoS1 SUBACK may still
+succeed. At 6500 ms or later the tracker becomes rejected with `timedOut`, and a late
+SUBACK cannot turn that timed-out operation back into success.
+
+An ordinary transport disconnect resets the tracked-subscription slot because pinned
+espMqttClient 1.7.3 removes SUBSCRIBE packets from its outbox during disconnect
+cleanup. A later session initializer therefore restarts from the first command topic.
+
+The later runtime phase must keep transport-connected, session-initializing, and
+application-ready states separate. Retained `balkons/status=online` is forbidden
+until both command subscriptions have independently completed this exact QoS1 SUBACK
+gate.
+
 ## Tracked Telegram publication
 
 `balkons/telegram_out` needs different treatment because the firmware already keeps
@@ -76,26 +107,37 @@ remains QoS0.
 
 The adapter owns one fixed tracked slot:
 
-- topic storage: 64 bytes;
-- payload storage: 896 bytes;
+- topic storage: 64 bytes, allowing at most 63 text bytes plus the NUL terminator;
+- payload storage: 896 bytes, allowing at most 895 text bytes plus the NUL terminator;
 - conservative worst-case MQTT QoS1 PUBLISH size: 969 bytes;
 - compile-time `static_assert` requires that worst-case packet size to remain within
   the explicit 1024-byte TX buffer;
 - no dynamic allocation in the tracked-copy layer;
-- the payload may be accepted while MQTT is disconnected;
-- once connected, `pumpTrackedPublish()` sends it with QoS1;
-- `onPublish(packetId)` clears the tracked copy only after broker PUBACK;
-- if MQTT disconnects before PUBACK, only the in-flight packet ID is cleared; the
-  tracked topic/payload remain in adapter RAM and can be retried after reconnect.
+- the payload may be staged while MQTT is disconnected;
+- once connected, `pumpTrackedPublish()` sends the staged copy with QoS1;
+- the adapter models ownership explicitly as `empty`, `staged`, or `inFlight`;
+- after a nonzero publish packet ID is returned, that exact packet ID remains owned
+  by the adapter until the matching PUBACK arrives;
+- ordinary disconnect/reconnect does **not** clear or downgrade an `inFlight` tracked
+  publish and does not enqueue a second application-level PUBLISH.
 
-This is at-least-once broker delivery. A rare lost PUBACK after broker acceptance can
-cause the notification to be retried and therefore duplicated downstream. It is a
-known tradeoff for preserving notification loss-resistance and must not be described
-as exactly-once Telegram delivery.
+This reconnect behavior is intentional for the pinned espMqttClient 1.7.3 contract:
+its ordinary disconnect queue cleanup retains unacknowledged QoS>0 PUBLISH packets,
+so the library can retransmit the original packet. Clearing the adapter's packet ID
+on disconnect would make the adapter forget that retained upstream ownership and
+could cause an unnecessary second publish after reconnect.
+
+Only a matching PUBACK clears the tracked slot. Mismatched/stale PUBACKs are ignored.
+The result is at-least-once broker delivery: a broker-accepted PUBLISH whose PUBACK is
+lost can still be delivered more than once at the MQTT protocol level, but the adapter
+must not create an additional duplicate by re-enqueueing the same logical Telegram
+message after every reconnect.
 
 The later firmware integration can keep the existing eight-message application
 queue for additional notifications. One message at a time can move from that queue
-into the adapter's tracked slot; only the adapter copy is removed on broker PUBACK.
+into the adapter's tracked slot; the application queue item may be removed once the
+adapter has accepted its own fixed staged copy, while the adapter keeps that copy
+until matching PUBACK.
 
 ## No pump-command QoS change
 
