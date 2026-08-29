@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   materialize:
-    if: github.event.head_commit.message == 'chore: stage C4 deterministic runtime switch'
+    if: "${{ github.event.head_commit.message == 'chore: repair C4 deterministic runtime staging' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -21,12 +21,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify exact staging parent and scope
+      - name: Verify exact staging ancestry and scope
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "45934a38ec39afe279cb9a8e93f65518937b94a3"
-          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/c4-materialize.yml"
+          test "$(git rev-parse HEAD^^)" = "45934a38ec39afe279cb9a8e93f65518937b94a3"
+          test "$(git rev-parse HEAD^)" = "84d6ef73d45084f3232ceab3ec9a9ffda0f62879"
+          test "$(git diff --name-only 45934a38ec39afe279cb9a8e93f65518937b94a3 HEAD)" = ".github/workflows/c4-materialize.yml"
           test "$(git hash-object src/main.cpp)" = "1b4fd87415cd9cce9b24eae2dd1f574aafe35fd7"
 
       - name: Render exact candidate and update canonical PlatformIO runtime
