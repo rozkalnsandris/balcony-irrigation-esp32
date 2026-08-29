@@ -1,0 +1,83 @@
+name: C4 materialize deterministic runtime
+
+on:
+  push:
+    branches:
+      - agent/issue31-c4-runtime-switch
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.event.head_commit.message == 'chore: stage C4 deterministic runtime switch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out C4 branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact staging parent and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "45934a38ec39afe279cb9a8e93f65518937b94a3"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/c4-materialize.yml"
+          test "$(git hash-object src/main.cpp)" = "1b4fd87415cd9cce9b24eae2dd1f574aafe35fd7"
+
+      - name: Render exact candidate and update canonical PlatformIO runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_a="${RUNNER_TEMP}/mqtt-runtime-candidate-a.cpp"
+          candidate_b="${RUNNER_TEMP}/mqtt-runtime-candidate-b.cpp"
+
+          python scripts/test_render_mqtt_runtime_candidate.py
+          python scripts/render_mqtt_runtime_candidate.py src/main.cpp --output "${candidate_a}"
+          python scripts/render_mqtt_runtime_candidate.py src/main.cpp --output "${candidate_b}"
+          cmp -s "${candidate_a}" "${candidate_b}"
+          sha256sum "${candidate_a}" "${candidate_b}"
+          cp "${candidate_a}" src/main.cpp
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("platformio.ini")
+          text = path.read_text(encoding="utf-8")
+
+          old_base = """lib_deps =\n    knolleary/PubSubClient @ 2.8.0\n"""
+          new_base = """lib_deps =\n    https://github.com/bertmelis/espMqttClient.git#decfa510584c88cd1f0d24e591b92ac37d5bae2e\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
+          if text.count(old_base) != 1:
+              raise SystemExit("unexpected esp32_base PubSubClient anchor count")
+          text = text.replace(old_base, new_base, 1)
+
+          old_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 source-only adapter boundary. The real firmware remains on PubSubClient\n; in this phase; this environment compiles the pinned espMqttClient adapter.\nlib_deps =\n    knolleary/PubSubClient @ 2.8.0\n    bertmelis/espMqttClient @ 1.7.3\nbuild_flags =\n    -D MQTT_RUNTIME_ADAPTER_BUILD=1\n    -D EMC_ALLOW_NOT_CONNECTED_PUBLISH=0\n    -D EMC_RX_BUFFER_SIZE=1024\n    -D EMC_TX_BUFFER_SIZE=1024\n"""
+          new_adapter = """[env:esp32_mqtt_runtime_adapter]\nextends = esp32_base\n; #31 adapter boundary compile using the same exact canonical espMqttClient pin.\n"""
+          if text.count(old_adapter) != 1:
+              raise SystemExit("unexpected adapter environment anchor count")
+          text = text.replace(old_adapter, new_adapter, 1)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cmp -s "${candidate_a}" src/main.cpp
+          ! grep -F '<PubSubClient.h>' src/main.cpp
+          ! grep -F 'PubSubClient mqtt' src/main.cpp
+          ! grep -F 'knolleary/PubSubClient' platformio.ini
+          grep -F 'decfa510584c88cd1f0d24e591b92ac37d5bae2e' platformio.ini
+          test "$(git diff --name-only | sort)" = $'platformio.ini\nsrc/main.cpp'
+          git diff --check
+
+      - name: Commit deterministic C4 source switch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Andris Rožkalns"
+          git config user.email "277435981+rozkalnsandris@users.noreply.github.com"
+          git add src/main.cpp platformio.ini
+          git commit -m "mqtt: switch canonical firmware runtime to espMqttClient"
+          git push origin HEAD:agent/issue31-c4-runtime-switch
