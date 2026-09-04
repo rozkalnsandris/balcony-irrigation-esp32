@@ -168,6 +168,8 @@ bool pumpWasRunningAtBoot = false;
 uint32_t lastWiFiReconnectAttempt = 0;
 uint32_t lastMqttReconnectAttempt = 0;
 uint32_t lastMqttPublish = 0;
+bool moisturePublishActive = false;
+uint8_t moisturePublishSensor = 0;
 
 // ============================================================
 // WATCHDOG
@@ -614,7 +616,7 @@ bool mqttDiagnosticPublishAllowed() {
          mqttSessionInitState == MqttSessionInitState::WifiRestoredLog;
 }
 
-void logEvent(const String& msg) {
+void writeEventLog(const String& msg, bool publishMqtt) {
 
   String line =
       getTimeString() +
@@ -626,7 +628,7 @@ void logEvent(const String& msg) {
     line
   );
 
-  if (mqttDiagnosticPublishAllowed()) {
+  if (publishMqtt && mqttDiagnosticPublishAllowed()) {
     mqtt.publishBestEffort(
       T_LOG,
       line.c_str(),
@@ -635,6 +637,20 @@ void logEvent(const String& msg) {
   }
 
   sendSyslog(msg);
+}
+
+void logEvent(const String& msg) {
+  writeEventLog(msg, true);
+}
+
+void logCommandReceipt(const String& command) {
+  // espMqttClient/NetworkClient write ir synchronous. Komandas saņemšanas
+  // diagnostika nedrīkst izveidot MQTT write darbu pirms Telegram atbildes.
+  writeEventLog(
+    "Komanda (MQTT): " +
+    command,
+    false
+  );
 }
 
 // ============================================================
@@ -1508,6 +1524,8 @@ void resetMqttSessionInit() {
   mqttDiscoverySensorIndex = 0;
   mqttSessionStepStartedAt = 0;
   mqttDiscoveryWindowStartedAt = 0;
+  moisturePublishActive = false;
+  moisturePublishSensor = 0;
   mqtt.resetTrackedSubscription();
 }
 
@@ -2022,42 +2040,99 @@ void serviceMQTT() {
 // MQTT MITRUMA PUBLICĒŠANA
 // ============================================================
 
-void publishMoisture() {
+void resetMoisturePublish() {
+  moisturePublishActive = false;
+  moisturePublishSensor = 0;
+}
+
+bool startMoisturePublish() {
+
+  if (
+      moisturePublishActive ||
+      pumpRunning ||
+      !mqttSessionReady() ||
+      !mqtt.isConnected() ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0 ||
+      commandQueueCount > 0
+  ) {
+    return false;
+  }
+
+  moisturePublishActive = true;
+  moisturePublishSensor = 0;
+  return true;
+}
+
+void serviceMoisturePublish() {
+
+  if (!moisturePublishActive) {
+    return;
+  }
+
+  // Telegram atbilde un ienākošās komandas vienmēr ir prioritāras pār
+  // periodisko best-effort sensoru telemetriju.
+  if (
+      commandQueueCount > 0 ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0
+  ) {
+    return;
+  }
 
   if (
       pumpRunning ||
       !mqttSessionReady() ||
       !mqtt.isConnected()
   ) {
+    resetMoisturePublish();
     return;
   }
 
-  char topic[48];
+  if (moisturePublishSensor >= SENSOR_COUNT) {
+    resetMoisturePublish();
+    Serial.println(
+      "MQTT mitrums nosūtīts"
+    );
+    return;
+  }
 
-  for (
-      int sensor = 0;
-      sensor < SENSOR_COUNT;
-      sensor++
+  const uint8_t sensor =
+      moisturePublishSensor++;
+
+  int raw =
+      readMoistureRaw(
+        sensor
+      );
+
+  servicePumpCriticalNetworkInput();
+
+  // Ja sensoru lasījuma laikā saņēmām komandu, neuzsākam background
+  // MQTT write; komandu apstrādās nākamais loop cikls.
+  if (
+      commandQueueCount > 0 ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0
   ) {
+    return;
+  }
 
-    int raw =
-        readMoistureRaw(
-          sensor
-        );
+  if (
+      pumpRunning ||
+      !mqttSessionReady() ||
+      !mqtt.isConnected()
+  ) {
+    resetMoisturePublish();
+    return;
+  }
 
-    servicePumpCriticalNetworkInput();
+  String category =
+      categorizeMoisture(
+        raw
+      );
 
-    String category =
-        categorizeMoisture(
-          raw
-        );
-
-    if (
-        category.length() ==
-        0
-    ) {
-      continue;
-    }
+  if (category.length() != 0) {
+    char topic[48];
 
     snprintf(
       topic,
@@ -2072,13 +2147,16 @@ void publishMoisture() {
       category.c_str(),
       false
     );
-
-    servicePump();
   }
 
-  Serial.println(
-    "MQTT mitrums nosūtīts"
-  );
+  servicePump();
+
+  if (moisturePublishSensor >= SENSOR_COUNT) {
+    resetMoisturePublish();
+    Serial.println(
+      "MQTT mitrums nosūtīts"
+    );
+  }
 }
 
 // ============================================================
@@ -2123,8 +2201,7 @@ void processCommand(
 
   command.trim();
 
-  logEvent(
-    "Komanda (MQTT): " +
+  logCommandReceipt(
     command
   );
 
@@ -2912,24 +2989,6 @@ void loop() {
   servicePump();
 
   // ----------------------------------------------------------
-  // Periodiska mitruma publicēšana
-  // ----------------------------------------------------------
-
-  if (
-      !pumpRunning &&
-      mqtt.connected() &&
-      millis() -
-      lastMqttPublish >=
-      MQTT_PUBLISH_INTERVAL_MS
-  ) {
-
-    lastMqttPublish =
-        millis();
-
-    publishMoisture();
-  }
-
-  // ----------------------------------------------------------
   // Pabeigtas laistīšanas paziņojums
   // ----------------------------------------------------------
 
@@ -2950,12 +3009,34 @@ void loop() {
   }
 
   // ----------------------------------------------------------
-  // Pēc application session Ready apkalpojam vienu bounded Telegram soli.
+  // Telegram atbildei ir prioritāte pār background sensoru telemetriju.
   // ----------------------------------------------------------
 
   if (mqttSessionReady()) {
     serviceTelegramDelivery();
   }
+
+  // ----------------------------------------------------------
+  // Periodiska mitruma publicēšana — pa vienam sensoram ciklā.
+  // ----------------------------------------------------------
+
+  if (
+      !moisturePublishActive &&
+      !pumpRunning &&
+      mqttSessionReady() &&
+      mqtt.isConnected() &&
+      millis() -
+      lastMqttPublish >=
+      MQTT_PUBLISH_INTERVAL_MS
+  ) {
+
+    if (startMoisturePublish()) {
+      lastMqttPublish =
+          millis();
+    }
+  }
+
+  serviceMoisturePublish();
 
   // Īss yield sistēmas taskiem.
   delay(1);
