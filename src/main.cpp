@@ -14,7 +14,9 @@
 #include "secrets.h"
 #include "command_safety.h"
 #include "command_payload_policy.h"
+#include "command_parse_policy.h"
 #include "network_reconnect_policy.h"
+#include "ota_error_policy.h"
 #include "pump_timing_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
@@ -156,7 +158,7 @@ char mqttClientId[48] = {0};
 bool wifiOnline = false;
 bool wifiEverConnected = false;
 
-bool otaStarted = false;
+bool otaTransferStarted = false;
 bool timeConfigured = false;
 
 bool pendingWiFiRestoredLog = false;
@@ -166,6 +168,8 @@ bool pumpWasRunningAtBoot = false;
 uint32_t lastWiFiReconnectAttempt = 0;
 uint32_t lastMqttReconnectAttempt = 0;
 uint32_t lastMqttPublish = 0;
+bool moisturePublishActive = false;
+uint8_t moisturePublishSensor = 0;
 
 // ============================================================
 // WATCHDOG
@@ -548,7 +552,9 @@ void tgSend(const String& msg) {
 
 void serviceTelegramDelivery() {
 
-  if (!mqttSessionReady()) {
+  // Pinned synchronous NetworkClient write path has no hard low-latency bound.
+  // Kamēr sūknis darbojas, neģenerējam jaunu application-level MQTT write darbu.
+  if (pumpRunning || !mqttSessionReady()) {
     return;
   }
 
@@ -600,7 +606,7 @@ void serviceTelegramDelivery() {
 // ============================================================
 
 bool mqttDiagnosticPublishAllowed() {
-  if (!mqtt.isConnected()) {
+  if (pumpRunning || !mqtt.isConnected()) {
     return false;
   }
 
@@ -610,7 +616,7 @@ bool mqttDiagnosticPublishAllowed() {
          mqttSessionInitState == MqttSessionInitState::WifiRestoredLog;
 }
 
-void logEvent(const String& msg) {
+void writeEventLog(const String& msg, bool publishMqtt) {
 
   String line =
       getTimeString() +
@@ -622,7 +628,7 @@ void logEvent(const String& msg) {
     line
   );
 
-  if (mqttDiagnosticPublishAllowed()) {
+  if (publishMqtt && mqttDiagnosticPublishAllowed()) {
     mqtt.publishBestEffort(
       T_LOG,
       line.c_str(),
@@ -633,11 +639,25 @@ void logEvent(const String& msg) {
   sendSyslog(msg);
 }
 
+void logEvent(const String& msg) {
+  writeEventLog(msg, true);
+}
+
+void logCommandReceipt(const String& command) {
+  // espMqttClient/NetworkClient write ir synchronous. Komandas saņemšanas
+  // diagnostika nedrīkst izveidot MQTT write darbu pirms Telegram atbildes.
+  writeEventLog(
+    "Komanda (MQTT): " +
+    command,
+    false
+  );
+}
+
 // ============================================================
 // SŪKŅA VADĪBA
 // ============================================================
 
-bool publishPumpStatus() {
+bool publishPumpStatusValue(bool running) {
 
   if (!mqtt.isConnected()) {
     return false;
@@ -652,9 +672,13 @@ bool publishPumpStatus() {
 
   return mqtt.publishBestEffort(
     T_PUMP_ST,
-    pumpRunning ? "ON" : "OFF",
+    running ? "ON" : "OFF",
     true
   );
+}
+
+bool publishPumpStatus() {
+  return publishPumpStatusValue(pumpRunning);
 }
 
 bool startPump(uint32_t seconds) {
@@ -670,12 +694,37 @@ bool startPump(uint32_t seconds) {
     return false;
   }
 
+  // Synchronous espMqttClient/NetworkClient outbox tiek servēts pirms inbound.
+  // Tāpēc jaunu pump session sākam tikai no Ready + lokāli tukša outbox stāvokļa.
+  if (
+      !mqttSessionReady() ||
+      !mqtt.isConnected() ||
+      mqtt.queueSize() != 0U ||
+      mqtt.trackedPublishBusy()
+  ) {
+    return false;
+  }
+
   seconds =
       pump_timing_policy::normalizeRequestedSeconds(
         seconds,
         DEFAULT_PUMP_SECONDS,
         MAX_PUMP_SECONDS
       );
+
+  // Retained ON tiek mēģināts, kamēr relejs vēl fiziski OFF. Ja synchronous
+  // write neatbrīvo lokālo outbox, fail-closed paliekam OFF un pārtraucam sesiju,
+  // lai novecojis ON vēlāk netiktu izsūtīts pēc atteikta pump starta.
+  if (!publishPumpStatusValue(true)) {
+    return false;
+  }
+
+  if (urgentPumpStopPending || mqtt.queueSize() != 0U) {
+    if (mqtt.queueSize() != 0U) {
+      mqtt.forceDisconnect();
+    }
+    return false;
+  }
 
   uint32_t now = millis();
 
@@ -703,8 +752,6 @@ bool startPump(uint32_t seconds) {
     String(seconds) +
     " sek"
   );
-
-  publishPumpStatus();
 
   tgSend(
     "💧 Laistīšana sākta! (" +
@@ -843,7 +890,7 @@ void requestUrgentPumpStop(bool fromHA) {
 
   // Drošības efekts notiek uzreiz callback kontekstā: tikai GPIO OFF.
   // MQTT publish/logging šeit apzināti neveicam, lai neizraisītu
-  // PubSubClient re-entrancy.
+  // MQTT callback re-entrancy.
   digitalWrite(
     RELAY_PIN,
     RELAY_OFF
@@ -910,11 +957,21 @@ void servicePumpCriticalNetworkInput() {
 // OTA
 // ============================================================
 
-void setupOTA() {
+void forcePumpOffForOtaSafety() {
+  digitalWrite(
+    RELAY_PIN,
+    RELAY_OFF
+  );
 
-  if (otaStarted) {
-    return;
-  }
+  // Jebkurš OTA lifecycle/error notikums ir jaunāks fail-safe OFF punkts.
+  // Tas arī padara iepriekš rindā esošus pump-start pieprasījumus stale.
+  pumpStopEpoch++;
+  pumpRunning = false;
+  pumpPlannedDurationMs = 0;
+  rtcPumpWasRunning = false;
+}
+
+void setupOTA() {
 
   if (
       WiFi.status() !=
@@ -922,6 +979,8 @@ void setupOTA() {
   ) {
     return;
   }
+
+  otaTransferStarted = false;
 
   ArduinoOTA.setHostname(
     OTA_HOSTNAME
@@ -933,17 +992,10 @@ void setupOTA() {
 
   ArduinoOTA.onStart([]() {
 
+    otaTransferStarted = true;
+
     // OTA laikā sūknis obligāti OFF.
-    digitalWrite(
-      RELAY_PIN,
-      RELAY_OFF
-    );
-
-    pumpRunning = false;
-
-    pumpPlannedDurationMs = 0;
-
-    rtcPumpWasRunning = false;
+    forcePumpOffForOtaSafety();
 
     disableWatchdogForOTA();
 
@@ -970,28 +1022,39 @@ void setupOTA() {
         String(error)
       );
 
-      // WDT OTA laikā tika noņemts.
-      // Drošākais stāvoklis pēc neveiksmīga OTA
-      // ir tīrs restarts ar releju OFF.
-      digitalWrite(
-        RELAY_PIN,
-        RELAY_OFF
-      );
+      // Relejs ir OFF pie jebkuras OTA kļūdas, arī auth/begin kļūdas,
+      // kas ArduinoOTA 3.3.11 var notikt pirms onStart().
+      forcePumpOffForOtaSafety();
 
+      if (
+          !ota_error_policy::shouldRestartAfterFailure(
+            otaTransferStarted
+          )
+      ) {
+        Serial.println(
+          "OTA kļūda pirms transfera sākuma — "
+          "turpinu bez restarta"
+        );
+        return;
+      }
+
+      // Pēc onStart() WDT tika noņemts, tāpēc neveiksmīgs transfers
+      // tiek pabeigts ar tīru restartu fail-safe OFF stāvoklī.
       delay(250);
 
       ESP.restart();
     }
   );
 
+  // ArduinoOTA.begin() atgriež void. Ja, piemēram, UDP bind neizdodas,
+  // publiskais API nedod success statusu. handle() droši no-op, ja instance
+  // nav inicializēta; nākamā Wi-Fi online pāreja atkārtos šo setup mēģinājumu.
   ArduinoOTA.begin();
 
-  otaStarted = true;
-
   Serial.println(
-    "OTA gatavs (" +
+    "OTA setup pieprasīts (" +
     WiFi.localIP().toString() +
-    ")"
+    "); ArduinoOTA.begin() success statusu neatgriež"
   );
 }
 
@@ -1434,6 +1497,7 @@ bool publishDiscoveryPump() {
     "\"name\":\"Sūknis\","
     "\"cmd_t\":\"balkons/sukna/komanda\","
     "\"stat_t\":\"balkons/sukna/stends\","
+    "\"qos\":1,"
     "\"pl_on\":\"ON\","
     "\"pl_off\":\"OFF\","
     "\"icon\":\"mdi:water-pump\","
@@ -1460,6 +1524,8 @@ void resetMqttSessionInit() {
   mqttDiscoverySensorIndex = 0;
   mqttSessionStepStartedAt = 0;
   mqttDiscoveryWindowStartedAt = 0;
+  moisturePublishActive = false;
+  moisturePublishSensor = 0;
   mqtt.resetTrackedSubscription();
 }
 
@@ -1974,41 +2040,99 @@ void serviceMQTT() {
 // MQTT MITRUMA PUBLICĒŠANA
 // ============================================================
 
-void publishMoisture() {
+void resetMoisturePublish() {
+  moisturePublishActive = false;
+  moisturePublishSensor = 0;
+}
+
+bool startMoisturePublish() {
 
   if (
+      moisturePublishActive ||
+      pumpRunning ||
       !mqttSessionReady() ||
-      !mqtt.isConnected()
+      !mqtt.isConnected() ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0 ||
+      commandQueueCount > 0
+  ) {
+    return false;
+  }
+
+  moisturePublishActive = true;
+  moisturePublishSensor = 0;
+  return true;
+}
+
+void serviceMoisturePublish() {
+
+  if (!moisturePublishActive) {
+    return;
+  }
+
+  // Telegram atbilde un ienākošās komandas vienmēr ir prioritāras pār
+  // periodisko best-effort sensoru telemetriju.
+  if (
+      commandQueueCount > 0 ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0
   ) {
     return;
   }
 
-  char topic[48];
-
-  for (
-      int sensor = 0;
-      sensor < SENSOR_COUNT;
-      sensor++
+  if (
+      pumpRunning ||
+      !mqttSessionReady() ||
+      !mqtt.isConnected()
   ) {
+    resetMoisturePublish();
+    return;
+  }
 
-    int raw =
-        readMoistureRaw(
-          sensor
-        );
+  if (moisturePublishSensor >= SENSOR_COUNT) {
+    resetMoisturePublish();
+    Serial.println(
+      "MQTT mitrums nosūtīts"
+    );
+    return;
+  }
 
-    servicePumpCriticalNetworkInput();
+  const uint8_t sensor =
+      moisturePublishSensor++;
 
-    String category =
-        categorizeMoisture(
-          raw
-        );
+  int raw =
+      readMoistureRaw(
+        sensor
+      );
 
-    if (
-        category.length() ==
-        0
-    ) {
-      continue;
-    }
+  servicePumpCriticalNetworkInput();
+
+  // Ja sensoru lasījuma laikā saņēmām komandu, neuzsākam background
+  // MQTT write; komandu apstrādās nākamais loop cikls.
+  if (
+      commandQueueCount > 0 ||
+      mqtt.trackedPublishBusy() ||
+      telegramQueueCount > 0
+  ) {
+    return;
+  }
+
+  if (
+      pumpRunning ||
+      !mqttSessionReady() ||
+      !mqtt.isConnected()
+  ) {
+    resetMoisturePublish();
+    return;
+  }
+
+  String category =
+      categorizeMoisture(
+        raw
+      );
+
+  if (category.length() != 0) {
+    char topic[48];
 
     snprintf(
       topic,
@@ -2023,13 +2147,16 @@ void publishMoisture() {
       category.c_str(),
       false
     );
-
-    servicePump();
   }
 
-  Serial.println(
-    "MQTT mitrums nosūtīts"
-  );
+  servicePump();
+
+  if (moisturePublishSensor >= SENSOR_COUNT) {
+    resetMoisturePublish();
+    Serial.println(
+      "MQTT mitrums nosūtīts"
+    );
+  }
 }
 
 // ============================================================
@@ -2074,8 +2201,7 @@ void processCommand(
 
   command.trim();
 
-  logEvent(
-    "Komanda (MQTT): " +
+  logCommandReceipt(
     command
   );
 
@@ -2134,24 +2260,23 @@ void processCommand(
       )
   ) {
 
-    int minutes =
-        command
-          .substring(6)
-          .toInt();
+    uint32_t minutes = 0U;
 
-    int maxMinutes =
+    const uint32_t maxMinutes =
         MAX_PUMP_SECONDS /
-        60;
+        60U;
 
-    if (
-        minutes > 0 &&
-        minutes <= maxMinutes
-    ) {
+    const bool validMinutes =
+        command_parse_policy::parsePositiveDecimal(
+          command.c_str() + 6,
+          maxMinutes,
+          minutes
+        );
+
+    if (validMinutes) {
 
       uint32_t requestedSeconds =
-          static_cast<uint32_t>(
-            minutes
-          ) *
+          minutes *
           60UL;
 
       if (pumpRunning) {
@@ -2256,7 +2381,7 @@ void processCommand(
       String category =
           categorizeMoisture(
             raw
-          );
+        );
 
       if (
           category.length() ==
@@ -2593,6 +2718,33 @@ void processCommand(
 
 void processCommandQueue() {
 
+  if (commandQueueCount == 0) {
+    return;
+  }
+
+  const PendingCommand& head =
+      commandQueue[commandQueueHead];
+
+  const bool mqttReady =
+      mqttSessionReady() &&
+      mqtt.isConnected();
+
+  // QoS1 command delivery can leave PUBACK work in the local outbox after
+  // callback return. Keep pump-start at the FIFO head until that protocol
+  // work (and any tracked publish) is drained while the relay is still OFF.
+  if (
+      command_safety::shouldDeferQueuedPumpStartForNetwork(
+        pumpRunning,
+        mqttReady,
+        mqtt.queueSize(),
+        mqtt.trackedPublishBusy(),
+        head.fromHA,
+        head.payload.c_str()
+      )
+  ) {
+    return;
+  }
+
   PendingCommand item;
 
   // Vienā loop ciklā apstrādājam vienu komandu.
@@ -2804,11 +2956,11 @@ void loop() {
   // ----------------------------------------------------------
 
   if (
-      otaStarted &&
       WiFi.status() ==
       WL_CONNECTED
   ) {
 
+    // ArduinoOTA.handle() publiski no-op, ja begin() nav inicializējis servisu.
     ArduinoOTA.handle();
   }
 
@@ -2837,23 +2989,6 @@ void loop() {
   servicePump();
 
   // ----------------------------------------------------------
-  // Periodiska mitruma publicēšana
-  // ----------------------------------------------------------
-
-  if (
-      mqtt.connected() &&
-      millis() -
-      lastMqttPublish >=
-      MQTT_PUBLISH_INTERVAL_MS
-  ) {
-
-    lastMqttPublish =
-        millis();
-
-    publishMoisture();
-  }
-
-  // ----------------------------------------------------------
   // Pabeigtas laistīšanas paziņojums
   // ----------------------------------------------------------
 
@@ -2874,12 +3009,34 @@ void loop() {
   }
 
   // ----------------------------------------------------------
-  // Pēc application session Ready apkalpojam vienu bounded Telegram soli.
+  // Telegram atbildei ir prioritāte pār background sensoru telemetriju.
   // ----------------------------------------------------------
 
   if (mqttSessionReady()) {
     serviceTelegramDelivery();
   }
+
+  // ----------------------------------------------------------
+  // Periodiska mitruma publicēšana — pa vienam sensoram ciklā.
+  // ----------------------------------------------------------
+
+  if (
+      !moisturePublishActive &&
+      !pumpRunning &&
+      mqttSessionReady() &&
+      mqtt.isConnected() &&
+      millis() -
+      lastMqttPublish >=
+      MQTT_PUBLISH_INTERVAL_MS
+  ) {
+
+    if (startMoisturePublish()) {
+      lastMqttPublish =
+          millis();
+    }
+  }
+
+  serviceMoisturePublish();
 
   // Īss yield sistēmas taskiem.
   delay(1);

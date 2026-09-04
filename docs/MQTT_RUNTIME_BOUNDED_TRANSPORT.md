@@ -5,6 +5,13 @@ Issue: `balcony-irrigation-esp32#31`
 This stacked source-only phase builds on the green adapter boundary in Draft PR #32.
 It still does **not** modify `src/main.cpp` or perform any runtime MQTT traffic.
 
+> Post-migration note: issue #49 re-audited these assumptions against the exact pinned
+> Arduino-ESP32 3.3.11 implementation. The TCP **connect** attempt is bounded, but a
+> connected synchronous `NetworkClient::write()` is not proven to have the same bound.
+> The current runtime therefore minimizes avoidable application-originated outbound
+> work while the pump is running and does not claim a hard MQTT service/STOP latency
+> bound under a pathological stalled socket.
+
 ## Why these primitives are separate
 
 The current firmware relies on two behaviors that should not be silently lost while
@@ -44,8 +51,45 @@ disconnected state when that cleanup window expires; callers must treat that as 
 failed cleanup, not as proof that the transport was force-closed.
 
 This remains acceptable only because the existing reconnect policy starts a new
-attempt while the pump is OFF. Connected MQTT servicing stays in the Arduino loop
-task so urgent STOP/OFF can arrive with low latency.
+attempt while the pump is OFF.
+
+## Pinned synchronous write limitation
+
+The 1000 ms value above is specifically a **connection timeout**, not a general
+upper bound for every call to the connected MQTT service loop.
+
+The exact Arduino-ESP32 3.3.11 `NetworkClient.cpp` used by the pinned pioarduino
+platform contains:
+
+- `WIFI_CLIENT_MAX_WRITE_RETRY = 10`;
+- `WIFI_CLIENT_SELECT_TIMEOUT_US = 1000000`;
+- a retry loop around the synchronous socket write path.
+
+The exact pinned espMqttClient `ClientSync::write()` delegates directly to this
+`NetworkClient::write()`, and espMqttClient services the outbound outbox before
+checking inbound packets in its connected loop. A pathological non-writable socket
+can therefore delay the next inbound STOP/OFF callback by more than the 1000 ms TCP
+connect timeout. The firmware must not document or depend on a stronger bound than
+the pinned source actually provides.
+
+Issue #49 hardens this boundary without inventing a custom transport fork:
+
+- new pump-start work waits while the MQTT outbox or tracked publish slot is busy;
+- the retained `ON` state is pushed while the relay is still OFF; the relay is only
+  activated if that best-effort QoS0 packet drained from the local outbox;
+- diagnostic MQTT logging, periodic moisture publication and tracked Telegram network
+  delivery do not create new application-originated network work while the pump runs;
+- reconnect remains forbidden while the pump runs;
+- urgent STOP/OFF still drives the relay physically OFF in callback context when the
+  callback is reached;
+- the local 180 s hard pump limit and task watchdog remain independent safety layers.
+
+Protocol-level traffic such as keepalive or MQTT acknowledgements can still require
+socket writes while connected. Therefore this is a **pressure-reduction and
+fail-closed start policy**, not a claim of a hard connected-service latency bound.
+`scripts/check_arduino_runtime_contract.py` pins the reviewed Arduino transport/OTA
+source so an upstream framework change fails CI instead of silently invalidating this
+analysis.
 
 ## Bounded best-effort QoS0
 
@@ -60,9 +104,10 @@ a discovery/status burst to grow without bound.
 This is still best-effort. It does not claim that QoS0 has received a broker
 acknowledgement.
 
-The later `main.cpp` integration must check/structure the connected-session burst so
-one failed queue attempt does not become an unbounded retry loop and urgent STOP
-servicing remains interleaved.
+The runtime structures the connected-session burst so one failed queue attempt does
+not become an unbounded retry burst. Issue #49 additionally prevents ordinary
+application-originated traffic from adding avoidable write pressure during an active
+pump session.
 
 ## Broker-confirmed command subscriptions
 
@@ -90,10 +135,9 @@ An ordinary transport disconnect resets the tracked-subscription slot because pi
 espMqttClient 1.7.3 removes SUBSCRIBE packets from its outbox during disconnect
 cleanup. A later session initializer therefore restarts from the first command topic.
 
-The later runtime phase must keep transport-connected, session-initializing, and
-application-ready states separate. Retained `balkons/status=online` is forbidden
-until both command subscriptions have independently completed this exact QoS1 SUBACK
-gate.
+The runtime keeps transport-connected, session-initializing, and application-ready
+states separate. Retained `balkons/status=online` is forbidden until both command
+subscriptions have independently completed this exact QoS1 SUBACK gate.
 
 ## Tracked Telegram publication
 
@@ -133,26 +177,27 @@ lost can still be delivered more than once at the MQTT protocol level, but the a
 must not create an additional duplicate by re-enqueueing the same logical Telegram
 message after every reconnect.
 
-The later firmware integration can keep the existing eight-message application
-queue for additional notifications. One message at a time can move from that queue
-into the adapter's tracked slot; the application queue item may be removed once the
-adapter has accepted its own fixed staged copy, while the adapter keeps that copy
-until matching PUBACK.
+The runtime keeps the existing eight-message application queue for additional
+notifications. One message at a time can move from that queue into the adapter's
+tracked slot; the application queue item may be removed once the adapter has accepted
+its own fixed staged copy, while the adapter keeps that copy until matching PUBACK.
+During a pump run, the tracked copy may remain staged/in-flight but no new application
+network pump is requested by `serviceTelegramDelivery()`.
 
-## No pump-command QoS change
+## Pump-command QoS
 
-This tracked QoS1 design is only for firmware-originated `balkons/telegram_out`.
-It does not alter Telegram-bot -> ESP32 pump command delivery policy from
-`RPi5_main#194`.
+Tracked Telegram QoS1 is independent from pump-command delivery. Home Assistant
+switch discovery now explicitly requests command `qos: 1`, and the ESP32 subscription
+requires a granted QoS1 SUBACK. MQTT delivery is still at-least-once: `ON`, `laist`
+and `laist_N` remain duplicate-sensitive and are not made application-idempotent by
+QoS1. Urgent STOP/OFF and stale-start suppression remain the safety mechanisms.
 
-In particular, `laist` and `laist_N` remain duplicate-sensitive and are not made
-QoS1/retry-safe by this work.
+## Historical phase boundary
 
-## Still not a runtime migration
-
-The stacked PR for these primitives compiles/tests the adapter only. `src/main.cpp`
-remains on PubSubClient. A later deterministic migration-render phase will prove the
-small runtime source delta in CI before any repository source switch is proposed.
+The original stacked PR for these primitives compiled/tested the adapter before the
+runtime source switch. The migration is now historical completed evidence; later
+source hardening such as issue #49 must preserve the frozen C4 renderer proof rather
+than requiring current `src/main.cpp` to stay byte-identical to the migration output.
 
 `CURRENT_PRODUCTION_AUTHORIZATION=NONE`. No OTA/flash, real MQTT publish/probe,
 broker or credential mutation, Home Assistant change, or pump command is authorized.
