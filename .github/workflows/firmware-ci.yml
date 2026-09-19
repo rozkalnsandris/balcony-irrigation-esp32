@@ -134,9 +134,15 @@ jobs:
           cmp -s "${candidate_a}" "${candidate_b}"
           cmp -s "${candidate_a}" "${c4}"
 
-          ! grep -F '<PubSubClient.h>' src/main.cpp
-          ! grep -F 'PubSubClient mqtt' src/main.cpp
-          ! grep -F 'knolleary/PubSubClient' platformio.ini
+          if grep -F '<PubSubClient.h>' src/main.cpp; then
+            exit 1
+          fi
+          if grep -F 'PubSubClient mqtt' src/main.cpp; then
+            exit 1
+          fi
+          if grep -F 'knolleary/PubSubClient' platformio.ini; then
+            exit 1
+          fi
           grep -F 'decfa510584c88cd1f0d24e591b92ac37d5bae2e' platformio.ini
 
           restore_tracked() {
