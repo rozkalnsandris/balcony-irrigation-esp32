@@ -712,6 +712,32 @@ bool startPump(uint32_t seconds) {
         MAX_PUMP_SECONDS
       );
 
+  // Sākuma paziņojumu sūtām best-effort, kamēr relejs vēl fiziski OFF.
+  // To nekad neliekam tracked/Telegram rindā, citādi pumpRunning drošības
+  // politika to aizturētu līdz OFF un radītu maldinošu novēlotu "sākta" ziņu.
+  const String startNotice =
+      "💧 Laistīšana sākas! (" +
+      String(seconds) +
+      " sek)";
+
+  if (telegramPayloadAllowed(startNotice)) {
+    const bool startNoticeAccepted =
+        mqtt.publishBestEffort(
+          T_OUT,
+          startNotice.c_str(),
+          false
+        );
+
+    if (startNoticeAccepted && mqtt.queueSize() != 0U) {
+      mqtt.forceDisconnect();
+      return false;
+    }
+  }
+
+  if (urgentPumpStopPending) {
+    return false;
+  }
+
   // Retained ON tiek mēģināts, kamēr relejs vēl fiziski OFF. Ja synchronous
   // write neatbrīvo lokālo outbox, fail-closed paliekam OFF un pārtraucam sesiju,
   // lai novecojis ON vēlāk netiktu izsūtīts pēc atteikta pump starta.
@@ -751,12 +777,6 @@ bool startPump(uint32_t seconds) {
     "Sūknis IESLĒGTS uz " +
     String(seconds) +
     " sek"
-  );
-
-  tgSend(
-    "💧 Laistīšana sākta! (" +
-    String(seconds) +
-    " sek)"
   );
 
   return true;
