@@ -105,6 +105,9 @@ jobs:
       - name: Run native command-safety tests
         run: pio test -e native
 
+      - name: Verify pump-start notice source contract
+        run: python scripts/check_pump_start_notice_contract.py
+
       - name: Verify frozen C4 runtime provenance
         shell: bash
         run: |
