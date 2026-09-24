@@ -36,6 +36,7 @@ Iepriekšējais `599abfac74b0b30fdc03e3076fda7630353812c0` bija pirmais veiksmī
 ├── include/secrets.example.h            # tikai piemērs; īstais secrets.h netiek commitots
 ├── platformio.ini                       # build-only CI + atsevišķa OTA vide
 ├── scripts/git_rev_macro.py             # build-time exact Git revision
+├── scripts/ota_upload_existing.py       # exact-artifact ArduinoOTA uploader
 ├── .github/workflows/firmware-ci.yml    # build-only GitHub Actions CI
 ├── docs/ARCHITECTURE.md
 ├── docs/HARDWARE.md
@@ -59,23 +60,37 @@ Iepriekšējais `599abfac74b0b30fdc03e3076fda7630353812c0` bija pirmais veiksmī
 pio run
 ```
 
-4. Tikai pirms apzināta OTA upload nodod uploaderim paroli caur PlatformIO oficiālo vides mainīgo:
+4. OTA build ir atsevišķs un pats par sevi neko neaugšupielādē:
 
 ```bash
-export PLATFORMIO_UPLOAD_FLAGS='--auth=YOUR_OTA_PASSWORD'
+pio run -e esp32_ota
 ```
 
-5. OTA upload (tikai tad, kad apzināti vēlies mainīt dzīvo ESP32):
+5. Pirms deploy nofiksē exact source SHA un `.pio/build/esp32_ota/firmware.bin` SHA-256. Kontrolētam deploy izmanto jau uzbūvēto artefaktu; `scripts/ota_upload_existing.py` pirms tīkla darbības pārbauda abus identifikatorus un tracked worktree tīrību.
 
 ```bash
+python scripts/ota_upload_existing.py \
+  --expected-source-sha <AUTHORIZED_GIT_SHA> \
+  --expected-firmware-sha256 <AUTHORIZED_FIRMWARE_SHA256>
+```
+
+Helperis nolasa tikai lokālo `OTA_PASSWORD` no ignored `include/secrets.h`, neizdrukā tā vērtību un izsauc pinned Arduino `espota.py` tajā pašā Python procesā, lai parole nebūtu jāliek shell komandā. Tas **neveido firmware no jauna**, neveic firewall izmaiņas un vienmēr izmanto reverse-TCP host portu `3233`.
+
+PlatformIO tiešam interaktīvam upload arī ir piesprausts tas pats ports. Ja apzināti izmanto `pio run -e esp32_ota -t upload`, auth dod ar atsevišķu mainīgo, nevis ar `PLATFORMIO_UPLOAD_FLAGS`:
+
+```bash
+export BALCONY_OTA_AUTH='YOUR_OTA_PASSWORD'
 pio run -e esp32_ota -t upload
+unset BALCONY_OTA_AUTH
 ```
 
-Pēc upload noņem slepeno mainīgo no shell sesijas:
+`BALCONY_OTA_AUTH` pieeja saglabā repo definēto `--host_port=3233`; `PLATFORMIO_UPLOAD_FLAGS` šim projektam neizmanto auth nodošanai, jo tas var aizstāt projekta upload flags.
 
-```bash
-unset PLATFORMIO_UPLOAD_FLAGS
-```
+### OTA tīkla/firewall priekšnosacījums
+
+Arduino `espota.py` vispirms veic UDP invitation/auth uz ESP32 portu `3232`, pēc tam ESP32 atver **TCP savienojumu atpakaļ uz uploader hostu**. Tāpēc uploader hostam jāpieņem `3233/tcp` no konkrētās ESP32 adreses. Firewall noteikumam jābūt šauram (ESP32 source IP → uploader host `3233/tcp`), nevis globāli atvērtam portam.
+
+Host firewall konfigurācija ir production/LIVE darbība un nav firmware build/merge blakusefekts. To konfigurē atsevišķi ar explicit owner autorizāciju. Helperis firewall nemaina.
 
 OTA mērķis ir `balkons-esp32.local`, kas atbilst firmware hostname; nav jāuztur cieti iešūta DHCP IP adrese OTA konfigurācijā.
 

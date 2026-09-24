@@ -108,6 +108,12 @@ jobs:
       - name: Verify pump-start notice source contract
         run: python scripts/check_pump_start_notice_contract.py
 
+      - name: Verify deterministic OTA upload contract
+        run: |
+          python scripts/check_ota_upload_contract.py
+          python -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/ota_upload_existing.py').read_text(encoding='utf-8'))"
+          python scripts/ota_upload_existing.py --help >/dev/null
+
       - name: Verify frozen C4 runtime provenance
         shell: bash
         run: |
