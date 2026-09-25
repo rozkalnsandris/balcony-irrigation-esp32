@@ -9,6 +9,19 @@
     "minimum_machine_schema": 2,
     "adoption_version": "2026-08-25.2"
   },
+  "github_api_access": {
+    "manifest": ".github/github-api-access-v1.json",
+    "accepted_shared_revision": "3bb0740b5f0a8ce631d2ff79f1acc4999ff6ed2c",
+    "start_budget": "BOOTSTRAP_MINIMAL",
+    "sync_budget": "PR_REFRESH_COMPACT",
+    "premerge_budget": "FINAL_PREMERGE_COMPACT",
+    "postmerge_budget": "EXACT_MAIN_MINIMAL",
+    "serial_requests": true,
+    "tight_polling": false,
+    "changed_files_on_demand_only": true,
+    "mutation_ambiguity_requires_read_only_reconciliation_and_stop": true,
+    "mutation_retry_widens_authority": false
+  },
   "authority": {
     "repository_rules": ["AGENTS.md"],
     "master_sources": [],
