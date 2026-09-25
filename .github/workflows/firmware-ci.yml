@@ -79,6 +79,9 @@ jobs:
       - name: Check repository safety
         run: python scripts/repo_safety_check.py
 
+      - name: Verify GitHub API access rollout contract
+        run: python scripts/test_github_api_access_contract.py
+
   build:
     needs: [classify, repository-safety]
     if: needs.classify.outputs.docs_only != 'true'
