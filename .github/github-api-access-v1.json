@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "repository": "rozkalnsandris/balcony-irrigation-esp32",
+  "contract": "GITHUB_API_ACCESS_V1",
+  "shared_contract_repository": "rozkalnsandris/ops-workflows",
+  "accepted_shared_revision": "3bb0740b5f0a8ce631d2ff79f1acc4999ff6ed2c",
+  "rollout_issue": "rozkalnsandris/ops-workflows#112",
+  "request_budget": {
+    "bootstrap": "BOOTSTRAP_MINIMAL",
+    "sync": "PR_REFRESH_COMPACT",
+    "changed_files": "PR_FILES_ON_DEMAND",
+    "premerge": "FINAL_PREMERGE_COMPACT",
+    "postmerge": "EXACT_MAIN_MINIMAL",
+    "deep_audit": "DEEP_AUDIT_EXPLICIT"
+  },
+  "read_behavior": {
+    "serial_requests": true,
+    "tight_polling": false,
+    "changed_files_on_demand_only": true,
+    "honor_retry_after": true,
+    "honor_primary_reset": true,
+    "secondary_backoff_seconds_minimum": 60,
+    "dispositions": [
+      "PRIMARY_RATE_LIMIT_EXHAUSTED",
+      "SECONDARY_RATE_LIMIT_SUSPECTED",
+      "RETRY_AFTER_REQUIRED",
+      "RESET_WAIT_REQUIRED",
+      "READ_BACKOFF_REQUIRED",
+      "TRANSPORT_RATE_LIMIT_METADATA_UNAVAILABLE"
+    ]
+  },
+  "mutation_behavior": {
+    "single_attempt_per_authorization": true,
+    "ambiguous_outcome_requires_read_only_reconciliation": true,
+    "stop_after_ambiguous_outcome": true,
+    "automatic_retry": false,
+    "automatic_rollback": false,
+    "automatic_cleanup": false,
+    "alternate_mutation_path": false,
+    "dispositions": [
+      "MUTATION_CONFIRMED_SUCCESS",
+      "MUTATION_CONFIRMED_REJECTED_BEFORE_APPLY",
+      "MUTATION_OUTCOME_UNKNOWN_RATE_LIMIT",
+      "MUTATION_OUTCOME_UNKNOWN_TIMEOUT",
+      "MUTATION_OUTCOME_UNKNOWN_TRANSPORT",
+      "POST_MUTATION_RECONCILIATION_REQUIRED"
+    ]
+  },
+  "authority_preservation": {
+    "merge_remains_explicit_owner_authority": true,
+    "live_device_authority_not_granted": true,
+    "firmware_flash_or_ota_not_granted": true,
+    "mqtt_or_home_assistant_mutation_not_granted": true,
+    "physical_actuation_not_granted": true,
+    "credentials_permissions_repository_settings_not_granted": true
+  }
+}
