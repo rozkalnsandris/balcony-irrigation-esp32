@@ -46,6 +46,18 @@
       "POST_MUTATION_RECONCILIATION_REQUIRED"
     ]
   },
+  "write_preflight_compact": {
+    "contract": "WRITE_PREFLIGHT_COMPACT_V1",
+    "branch_absent": "ELIGIBLE",
+    "branch_exact_existing_sha": "ALREADY_SATISFIED",
+    "branch_other_sha": "CONFLICT_STOP",
+    "pr_exact_existing_intent": "RECONCILE_OR_NOOP",
+    "pr_conflicting_identity": "STOP",
+    "stale_writer": "STOP",
+    "duplicate_after_ambiguous_outcome": false,
+    "expected_head_binding_required_when_supported": true,
+    "separate_final_premerge_compact_required": true
+  },
   "authority_preservation": {
     "merge_remains_explicit_owner_authority": true,
     "live_device_authority_not_granted": true,
