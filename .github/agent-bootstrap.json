@@ -1,0 +1,23 @@
+{
+  "schema": "rozkalns.agent-bootstrap.v1",
+  "repository": "rozkalnsandris/balcony-irrigation-esp32",
+  "shared_policy": {
+    "work_cycle": "docs/WORK_CYCLE_V23_ADOPTION.md",
+    "github_api_access": ".github/github-api-access-v1.json"
+  },
+  "rules": {
+    "primary": "AGENTS.md",
+    "local_strict_rules": [
+      "AGENTS.md#firmware-safety"
+    ]
+  },
+  "continuation": {
+    "kind": "none"
+  },
+  "automation": {
+    "fast_lane": true,
+    "auto_run_full": false,
+    "queue_mode": "supported"
+  },
+  "deployment_profile": "source-only"
+}
