@@ -22,7 +22,18 @@ Lietotājvārds un parole ir tikai `include/secrets.h` un netiek glabāti Git.
 
 ## Home Assistant discovery
 
-ESP32 publicē 15 sensorus un vienu sūkņa switch zem `homeassistant/.../config`. Ierīces identitāte: `balkons_esp32`, nosaukums “Balkona Laistīšana”.
+ESP32 izmanto 15 fiziskus MUX kanālus, bet publicē **12 aktīvos sensorus** (puķes 1 un 3–13) un vienu sūkņa switch zem `homeassistant/.../config`. Ierīces identitāte: `balkons_esp32`, nosaukums “Balkona Laistīšana”.
+
+### Deaktivizētie kanāli un Home Assistant cleanup
+
+Puķes **2, 14 un 15** ir deaktivizētas firmware: 2. puķes sensora vai vada signāls nav uzticams; 14. un 15. puķe ir noņemtas. Šie MUX kanāli netiek lasīti, netiek parādīti `mitrums` / `raw` atskaitēs, netiek publicēti MQTT telemetrijā un nepalielina aktīvo sensoru skaitu. Sūkņa komandu un drošības limitu loģika netiek mainīta.
+
+Pēc firmware ielādes un MQTT atkalsavienojuma ESP32 sūta tukšu retained discovery payload uz:
+- `homeassistant/sensor/balkons_puke2/config`
+- `homeassistant/sensor/balkons_puke14/config`
+- `homeassistant/sensor/balkons_puke15/config`
+
+Home Assistant šādi izdzēš vecās MQTT discovery entītijas. Tā kā firmware discovery režīms ir best-effort un ar ierobežotu laika budžetu, pēc **atsevišķi autorizēta OTA** jāpārbauda šo trīs retained ierakstu un entītiju faktiskā pazušana. Ja veci retained telemetrijas ziņojumi ir saglabāti `balkons/puke{2,14,15}/mitrums`, tie jānotīra ar tukšu retained ziņojumu tikai atsevišķi autorizētā LIVE darbībā. Manuāli konfigurētās Home Assistant dashboard kartītes vai automatizācijas ar vecajiem entity ID jāpārbauda atsevišķi. **Source merge pats neveic OTA, MQTT cleanup vai Home Assistant izmaiņas.**
 
 Discovery payloadi ir retained; availability tiek publicēta `balkons/status`, ieskaitot MQTT Last Will `offline`.
 

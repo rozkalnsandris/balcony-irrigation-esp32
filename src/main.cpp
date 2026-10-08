@@ -18,6 +18,7 @@
 #include "network_reconnect_policy.h"
 #include "ota_error_policy.h"
 #include "pump_timing_policy.h"
+#include "sensor_enable_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
 #define FIRMWARE_GIT_REV "unknown"
@@ -90,7 +91,7 @@ constexpr uint8_t MUX_S3 = 27;
 
 constexpr uint8_t MUX_SIG = 34;
 
-constexpr uint8_t SENSOR_COUNT = 15;
+constexpr uint8_t SENSOR_COUNT = sensor_enable_policy::kSensorCount;
 
 // Relejs ir active-low.
 constexpr uint8_t RELAY_ON = LOW;
@@ -1257,6 +1258,11 @@ int readMoistureRaw(
   int sensorIndex
 ) {
 
+  // Never sample or classify a disabled or out-of-range channel.
+  if (!sensor_enable_policy::isEnabled(sensorIndex)) {
+    return -1;
+  }
+
   selectSensor(
     sensorIndex
   );
@@ -1465,6 +1471,11 @@ bool publishDiscoverySensor(uint8_t sensor) {
     "balkons_puke%d/config",
     sensor + 1
   );
+
+  // Remove previously retained HA discovery for disabled sensors.
+  if (!sensor_enable_policy::isEnabled(sensor)) {
+    return mqtt.publishBestEffort(topic, "", true);
+  }
 
   snprintf(
     payload,
@@ -2109,6 +2120,14 @@ void serviceMoisturePublish() {
     return;
   }
 
+  // Skip disabled channels without touching ADC or MQTT telemetry.
+  while (
+      moisturePublishSensor < SENSOR_COUNT &&
+      !sensor_enable_policy::isEnabled(moisturePublishSensor)
+  ) {
+    ++moisturePublishSensor;
+  }
+
   if (moisturePublishSensor >= SENSOR_COUNT) {
     resetMoisturePublish();
     Serial.println(
@@ -2391,6 +2410,10 @@ void processCommand(
         sensor++
     ) {
 
+      if (!sensor_enable_policy::isEnabled(sensor)) {
+        continue;
+      }
+
       int raw =
           readMoistureRaw(
             sensor
@@ -2440,7 +2463,7 @@ void processCommand(
         ) +
         "/" +
         String(
-          SENSOR_COUNT
+          sensor_enable_policy::kEnabledSensorCount
         );
 
     tgSend(
@@ -2469,6 +2492,10 @@ void processCommand(
         sensor < SENSOR_COUNT;
         sensor++
     ) {
+
+      if (!sensor_enable_policy::isEnabled(sensor)) {
+        continue;
+      }
 
       selectSensor(
         sensor
