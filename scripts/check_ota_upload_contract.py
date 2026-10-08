@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ota_upload_existing import platformio_core_directory
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -34,6 +36,25 @@ def main() -> int:
     require("--expected-firmware-sha256" in helper, "artifact hash guard missing")
     require("--untracked-files=no" in helper, "tracked-worktree guard missing")
     require("OTA_AUTH=loaded-not-displayed" in helper, "safe auth status missing")
+
+    # Pin both PlatformIO JSON shapes. A malformed result must fail closed.
+    core = "/opt/platformio-core"
+    require(
+        platformio_core_directory({"core_dir": core}) == Path(core),
+        "legacy PlatformIO core_dir layout rejected",
+    )
+    require(
+        platformio_core_directory({"core_dir": {"title": "Core Directory", "value": core}})
+        == Path(core),
+        "structured PlatformIO core_dir layout rejected",
+    )
+    for invalid in (None, "", "relative-path", {"title": "Core Directory"}, 42):
+        try:
+            platformio_core_directory({"core_dir": invalid})
+        except SystemExit as exc:
+            require(str(exc) == "PLATFORMIO_CORE_DIR_INVALID", "unsafe core_dir failure")
+        else:
+            require(False, "invalid PlatformIO core_dir unexpectedly accepted")
 
     require("PLATFORMIO_UPLOAD_FLAGS='--auth=" not in readme, "unsafe old auth guidance remains")
     require("3233/tcp" in readme, "firewall prerequisite not documented")
