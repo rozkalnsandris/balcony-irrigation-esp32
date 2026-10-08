@@ -66,6 +66,19 @@ def find_pio() -> str:
     fail("PlatformIO executable not found (tried pio-balcony and pio)")
 
 
+def platformio_core_directory(info: dict) -> Path:
+    """Accept both PlatformIO plain and title/value JSON info layouts."""
+    core_dir = info.get("core_dir")
+    if isinstance(core_dir, dict):
+        core_dir = core_dir.get("value")
+    if not isinstance(core_dir, str) or not core_dir.strip():
+        fail("PLATFORMIO_CORE_DIR_INVALID")
+    path = Path(core_dir)
+    if not path.is_absolute():
+        fail("PLATFORMIO_CORE_DIR_INVALID")
+    return path
+
+
 def find_espota(pio: str) -> Path:
     result = subprocess.run(
         [pio, "system", "info", "--json-output"],
@@ -74,7 +87,7 @@ def find_espota(pio: str) -> Path:
         text=True,
     )
     data = json.loads(result.stdout)
-    core_dir = Path(data["core_dir"])
+    core_dir = platformio_core_directory(data)
     espota = core_dir / "packages/framework-arduinoespressif32/tools/espota.py"
     if not espota.is_file():
         fail(f"espota.py not found under PlatformIO core: {core_dir}")
