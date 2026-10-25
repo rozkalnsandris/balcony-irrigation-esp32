@@ -7,12 +7,13 @@ namespace sensor_enable_policy {
 
 constexpr std::uint8_t kSensorCount = 15U;
 
-// Flowers 2 and 11: unreliable/disconnected signal. Flowers 14/15: removed.
+// Flowers 2, 11 and 13: unreliable/disconnected signal. Flowers 14/15: removed.
 constexpr bool isEnabled(int channelIndex) {
   return channelIndex >= 0 &&
          channelIndex < kSensorCount &&
          channelIndex != 1 &&
          channelIndex != 10 &&
+         channelIndex != 12 &&
          channelIndex != 13 &&
          channelIndex != 14;
 }
@@ -28,6 +29,6 @@ constexpr std::uint8_t countEnabled() {
 }
 
 constexpr std::uint8_t kEnabledSensorCount = countEnabled();
-static_assert(kEnabledSensorCount == 11U, "Unexpected active sensor count");
+static_assert(kEnabledSensorCount == 10U, "Unexpected active sensor count");
 
 }  // namespace sensor_enable_policy

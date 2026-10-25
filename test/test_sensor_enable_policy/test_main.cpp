@@ -9,13 +9,14 @@ void tearDown() {}
 void test_disabled_channels() {
   TEST_ASSERT_FALSE(sensor_enable_policy::isEnabled(1));   // Flower 2
   TEST_ASSERT_FALSE(sensor_enable_policy::isEnabled(10));  // Flower 11
+  TEST_ASSERT_FALSE(sensor_enable_policy::isEnabled(12));  // Flower 13
   TEST_ASSERT_FALSE(sensor_enable_policy::isEnabled(13));  // Flower 14
   TEST_ASSERT_FALSE(sensor_enable_policy::isEnabled(14));  // Flower 15
 }
 
 void test_all_other_channels_enabled() {
   for (int channel = 0; channel < sensor_enable_policy::kSensorCount; ++channel) {
-    const bool expected = channel != 1 && channel != 10 && channel != 13 && channel != 14;
+    const bool expected = channel != 1 && channel != 10 && channel != 12 && channel != 13 && channel != 14;
     TEST_ASSERT_EQUAL_INT(expected, sensor_enable_policy::isEnabled(channel));
   }
 }
@@ -28,7 +29,7 @@ void test_out_of_range_fail_closed() {
 
 void test_active_count() {
   TEST_ASSERT_EQUAL_UINT8(15U, sensor_enable_policy::kSensorCount);
-  TEST_ASSERT_EQUAL_UINT8(11U, sensor_enable_policy::kEnabledSensorCount);
+  TEST_ASSERT_EQUAL_UINT8(10U, sensor_enable_policy::kEnabledSensorCount);
 }
 
 int main() {
