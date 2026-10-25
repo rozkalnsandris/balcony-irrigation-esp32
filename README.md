@@ -1,6 +1,6 @@
 # Balkona laistīšana — ESP32
 
-Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto ESP32, 15 fiziskus augsnes mitruma kanālus caur CD74HC4067 multipleksoru (11 aktīvus; puķes 2, 11, 14 un 15 deaktivizētas), releja vadītu R385 sūkni, MQTT, Home Assistant auto-discovery, OTA un RPi5 integrācijas.
+Balkona laistīšanas sistēmas source-of-truth repozitorijs. Sistēma izmanto ESP32, 15 fiziskus augsnes mitruma kanālus caur CD74HC4067 multipleksoru (10 aktīvus; puķes 2, 11, 13, 14 un 15 deaktivizētas), releja vadītu R385 sūkni, MQTT, Home Assistant auto-discovery, OTA un RPi5 integrācijas.
 
 > **Drošība:** repozitorijā nav un nedrīkst būt Wi-Fi, MQTT, Home Assistant, Telegram vai OTA paroles/tokeni. `include/secrets.h` ir lokāls fails un ir iekļauts `.gitignore`.
 
@@ -17,7 +17,7 @@ Iepriekšējais `599abfac74b0b30fdc03e3076fda7630353812c0` bija pirmais veiksmī
 ## Pašreizējais firmware
 
 - ESP32 Dev Module / Arduino framework / PlatformIO.
-- 15 mitruma kanāli caur CD74HC4067 MUX; aktīvas tikai puķes 1, 3–10, 12 un 13 (11 sensori).
+- 15 mitruma kanāli caur CD74HC4067 MUX; aktīvas tikai puķes 1, 3–10 un 12 (10 sensori).
 - Sensori tiek klasificēti kā `sauss`, `videjs`, `mitrs`.
 - MQTT brokeris un syslog atrodas RPi5 lokālajā tīklā.
 - Home Assistant sensoru un sūkņa switch auto-discovery.
