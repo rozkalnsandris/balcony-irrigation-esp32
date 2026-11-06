@@ -13,7 +13,7 @@ permissions:
 jobs:
   classify:
     name: FAST-LANE classify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
@@ -63,7 +63,7 @@ jobs:
 
   repository-safety:
     name: repository safety
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Check out repository
@@ -85,7 +85,7 @@ jobs:
   build:
     needs: [classify, repository-safety]
     if: needs.classify.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
@@ -216,7 +216,7 @@ jobs:
     name: FAST-LANE Merge Gate
     needs: [classify, repository-safety, build]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Verify required validation results
