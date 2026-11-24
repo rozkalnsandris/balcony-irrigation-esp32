@@ -19,6 +19,7 @@
 #include "ota_error_policy.h"
 #include "pump_timing_policy.h"
 #include "ha_bounded_watering_policy.h"
+#include "ha_fresh_offer_policy.h"
 #include "esp_random.h"
 #include "sensor_enable_policy.h"
 
@@ -2844,6 +2845,29 @@ void processCommand(
   }
 }
 
+// A fresh scan is local to one request. No background/retained sample reuse.
+bool freshOfferScanCurrent(uint32_t started, uint32_t epoch) {
+  return ha_fresh_offer::scanCurrent(
+      millis(), started, epoch, pumpStopEpoch,
+      !pumpRunning && digitalRead(RELAY_PIN) == RELAY_OFF &&
+      boundedNetworkReady());
+}
+
+bool collectFreshOfferScan(ha_fresh_offer::Scan& scan, uint32_t started,
+                           uint32_t epoch) {
+  for (int channel = 0; channel < SENSOR_COUNT; ++channel) {
+    if (!sensor_enable_policy::isEnabled(channel)) continue;
+    if (!freshOfferScanCurrent(started, epoch)) return false;
+    const int raw = readMoistureRaw(channel);
+    const String category = categorizeMoisture(raw);
+    // STOP, disconnect and watchdog service between every physical sample.
+    servicePumpCriticalNetworkInput();
+    if (!freshOfferScanCurrent(started, epoch) ||
+        !scan.append(channel, category.c_str())) return false;
+  }
+  return scan.complete() && freshOfferScanCurrent(started, epoch);
+}
+
 // Only called in the main loop, never from the MQTT callback.
 void processBoundedCommand(const PendingCommand& item) {
   using namespace ha_bounded_watering;
@@ -2852,6 +2876,14 @@ void processBoundedCommand(const PendingCommand& item) {
   const char* payload = item.payload.c_str();
   const Kind kind = decode(item.fromHA, false, payload, item.payload.length());
   if (kind == Kind::ticket) {
+    // Revoke any preceding offer before measurement, even on scan failure.
+    boundedGate.invalidate();
+    const uint32_t scanStarted = millis();
+    const uint32_t scanEpoch = pumpStopEpoch;
+    ha_fresh_offer::Scan scan;
+    if (!ha_fresh_offer::exactHex(FIRMWARE_GIT_REV,
+                                 ha_fresh_offer::kFirmwareChars) ||
+        !collectFreshOfferScan(scan, scanStarted, scanEpoch)) return;
     // Wi-Fi is active: ESP32 hardware RNG has its RF entropy source.
     // A per-boot 64-bit nonce + nonwrapping counter prevents within-boot reuse.
     if (boundedTicketSequence == 0U) {
@@ -2865,9 +2897,13 @@ void processBoundedCommand(const PendingCommand& item) {
              static_cast<unsigned long>(boundedBootNonce[0]),
              static_cast<unsigned long>(boundedBootNonce[1]),
              static_cast<unsigned long>(boundedTicketSequence));
-    if (!boundedGate.issue(token, millis())) return;
-    char reply[64] = {};
-    snprintf(reply, sizeof(reply), "offer:%s:%s", payload + 9U, token);
+    char reply[ha_fresh_offer::kOfferChars + 1U] = {};
+    if (!ha_fresh_offer::formatOffer(reply, sizeof(reply), payload + 9U,
+                                    token, FIRMWARE_GIT_REV, scan) ||
+        !freshOfferScanCurrent(scanStarted, scanEpoch) ||
+        !queueFresh(millis(), item.receivedAt, item.stopEpoch, pumpStopEpoch)) return;
+    // Both ticket TTL and cycle budget include the age of the oldest sample.
+    if (!boundedGate.issue(token, scanStarted)) return;
     if (!publishBoundedReply(reply)) boundedGate.invalidate();
     return;
   }
