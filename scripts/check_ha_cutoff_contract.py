@@ -42,8 +42,11 @@ def source_contract():
     require("alarm.flags.auto_reload_on_alarm = false;" in runtime, "not a one-shot")
     require("count > armedFromCount_" in runtime, "counter progression not checked")
     require("claimBudgetMs_" in runtime, "claim expiry not checked at final gate")
-    callback = runtime.split("static bool IRAM_ATTR onAlarm(", 1)[1].split(
-        "  bool fail()", 1)[0]
+    implementation = Path("src/ha_cutoff_runtime.cpp").read_text(encoding="utf-8")
+    require("static bool onAlarm(" in runtime and "static bool IRAM_ATTR onAlarm(" not in runtime,
+            "callback must not be an inline class definition")
+    callback = implementation.split("bool IRAM_ATTR Guard::onAlarm(", 1)[1].split(
+        "}  // namespace ha_cutoff", 1)[0]
     require("REG_WRITE(GPIO_OUT_W1TS_REG" in callback and
             "self->state_.alarm();" in callback and
             "portENTER_CRITICAL_ISR" in callback, "ISR does not force OFF and latch")

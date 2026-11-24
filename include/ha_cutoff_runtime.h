@@ -146,15 +146,8 @@ class Guard {
 
  private:
   // IRAM code, DRAM instance (declared in main.cpp), direct GPIO OFF.
-  static bool IRAM_ATTR onAlarm(gptimer_handle_t,
-                                const gptimer_alarm_event_data_t*, void* ctx) {
-    auto* self = static_cast<Guard*>(ctx);
-    portENTER_CRITICAL_ISR(&self->lock_);
-    REG_WRITE(GPIO_OUT_W1TS_REG, 1UL << kRelayPin);
-    self->state_.alarm();
-    portEXIT_CRITICAL_ISR(&self->lock_);
-    return false;
-  }
+  static bool onAlarm(gptimer_handle_t,
+                      const gptimer_alarm_event_data_t*, void* ctx);
 
   bool fail() {
     portENTER_CRITICAL(&lock_);
