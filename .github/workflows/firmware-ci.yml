@@ -86,7 +86,7 @@ jobs:
     needs: [classify, repository-safety]
     if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       PYTHONDONTWRITEBYTECODE: "1"
 
@@ -201,14 +201,45 @@ jobs:
       - name: Build ESP32 CI firmware
         run: pio run -e esp32_ci
 
-      - name: Build opt-in bounded HA firmware candidate (build only)
-        run: pio run -e esp32_ha_bounded_candidate
-
       - name: Run bounded Cppcheck analysis
         run: pio check -e esp32_check --fail-on-defect=high
 
       - name: Build ESP32 OTA firmware (build only)
         run: pio run -e esp32_ota
+
+      - name: Build opt-in bounded HA firmware candidate (build only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # HybridCompile rewrites SDK packages and generates project files.
+          # Never share those packages or generated settings with legacy builds.
+          candidate="${RUNNER_TEMP}/ha-cutoff-source"
+          revision="$(git rev-parse --verify HEAD)"
+          git clone --local --no-hardlinks --no-checkout . "${candidate}"
+          cd "${candidate}"
+          git checkout --detach "${revision}"
+          test "$(git rev-parse --verify HEAD)" = "${revision}"
+          printf '%s\n' '/.dummy/' '/CMakeLists.txt' '/sdkconfig.defaults' \
+            '/sdkconfig.esp32_ha_bounded_candidate' \
+            '/sdkconfig.esp32_ha_bounded_candidate.old' \
+            '/dependencies.lock' '/managed_components/' >> .git/info/exclude
+          cp include/secrets.example.h include/secrets.h
+          test -z "$(git status --porcelain)"
+          export PLATFORMIO_CORE_DIR="${RUNNER_TEMP}/ha-cutoff-platformio"
+          test ! -e "${PLATFORMIO_CORE_DIR}"
+          # Pinned platform 55.03.311 uses SCons 4.8.1. Its internal penv
+          # otherwise resolves pioarduino>=6.1.19 to 6.2.x (upstream #529/#556).
+          # Constrain the nested uv installer too, not only the outer CLI.
+          export UV_CONSTRAINT="${RUNNER_TEMP}/ha-cutoff-constraints.txt"
+          printf '%s\n' 'pioarduino==6.1.19' > "${UV_CONSTRAINT}"
+          pio run -e esp32_ha_bounded_candidate 2>&1 | tee "${RUNNER_TEMP}/ha-cutoff-build.log"
+          "${PLATFORMIO_CORE_DIR}/penv/bin/python" -c 'from importlib.metadata import version; v = version("pioarduino"); assert v == "6.1.19", v; print("HA_CUTOFF_CHILD_CORE=" + v)'
+          python scripts/check_ha_cutoff_contract.py \
+            --build-log "${RUNNER_TEMP}/ha-cutoff-build.log" \
+            --elf .pio/build/esp32_ha_bounded_candidate/firmware.elf \
+            --packages-root "${PLATFORMIO_CORE_DIR}/packages"
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
 
       - name: Verify repository restored and clean
         run: |
