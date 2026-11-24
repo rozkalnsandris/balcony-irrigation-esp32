@@ -128,10 +128,12 @@ class Guard {
     return result;
   }
 
-  void reconcile() {
+  bool reconcile() {
     portENTER_CRITICAL(&lock_);
+    const bool completed = state_.tripped();
     state_.reconcile();
     portEXIT_CRITICAL(&lock_);
+    return completed;
   }
 
  private:
