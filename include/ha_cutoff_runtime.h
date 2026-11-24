@@ -83,8 +83,13 @@ class Guard {
     const bool accepted = configured_ && state_.arm();
     portEXIT_CRITICAL(&lock_);
     if (!accepted) return false;
+    armedFromCount_ = count;
     alarm_ = count + ticks;
     sampled_ = sampled;
+    claimBudgetMs_ = remainingMs > ha_bounded_watering::kCycleMs -
+        ha_bounded_watering::kTicketTtlMs
+        ? remainingMs - (ha_bounded_watering::kCycleMs -
+                         ha_bounded_watering::kTicketTtlMs) : 0U;
     gptimer_alarm_config_t alarm{};
     alarm.alarm_count = alarm_;
     alarm.flags.auto_reload_on_alarm = false;
@@ -96,7 +101,10 @@ class Guard {
     uint64_t count = 0;
     if (gptimer_get_raw_count(timer_, &count) != ESP_OK) return fail();
     portENTER_CRITICAL(&lock_);
-    const bool accepted = state_.start(startWindow(count, alarm_, millis(), sampled_));
+    const uint32_t now = millis();
+    const bool accepted = state_.start(
+        count > armedFromCount_ && startWindow(count, alarm_, now, sampled_) &&
+        !ha_bounded_watering::elapsed(now, sampled_, claimBudgetMs_));
     if (accepted) {
       REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << kRelayPin);
     } else {
@@ -161,8 +169,10 @@ class Guard {
   State state_{};
   gptimer_handle_t timer_ = nullptr;
   bool configured_ = false;
+  uint64_t armedFromCount_ = 0;
   uint64_t alarm_ = 0;
   uint32_t sampled_ = 0;
+  uint32_t claimBudgetMs_ = 0;
 };
 
 }  // namespace ha_cutoff
