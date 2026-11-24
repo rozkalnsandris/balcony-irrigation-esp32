@@ -54,6 +54,37 @@ inline bool queueFresh(std::uint32_t now, std::uint32_t received,
   return queuedEpoch == epoch && !elapsed(now, received, kMaxQueuedMs);
 }
 
+// Record before scanning, including failed/canceled scans. This bounded FIFO
+// survives ticket invalidation, expiry, STOP, OTA and MQTT session changes in
+// the same boot. It is not a persistent or global replay database.
+class RecentRequests {
+ public:
+  static constexpr std::size_t kCapacity = 8U;
+
+  bool admit(const char* request) {
+    if (request == nullptr || std::strlen(request) != kRequestChars ||
+        !hexText(request, kRequestChars)) return false;
+    for (const auto& seen : ids_) {
+      if (std::strcmp(seen, request) == 0) return false;
+    }
+    std::memcpy(ids_[next_], request, kRequestChars + 1U);
+    next_ = (next_ + 1U) % kCapacity;
+    return true;
+  }
+
+ private:
+  char ids_[kCapacity][kRequestChars + 1U] = {};
+  std::size_t next_ = 0U;
+};
+
+// Whole-record transfer is shared with native tests: no individual metadata
+// field may be lost when a queue entry is consumed.
+template <typename Command>
+inline void takeQueuedCommand(Command& out, Command& slot) {
+  out = slot;
+  slot.payload = "";
+}
+
 class TicketGate {
  public:
   void invalidate() { state_ = State::empty; }
