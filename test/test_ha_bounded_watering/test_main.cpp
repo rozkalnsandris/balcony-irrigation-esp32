@@ -1,4 +1,6 @@
 #include <unity.h>
+#include <string>
+#include <cstdio>
 #include "ha_bounded_watering_policy.h"
 
 using namespace ha_bounded_watering;
@@ -92,6 +94,77 @@ void test_queued_stop_epoch_age_and_replacement() {
   TEST_ASSERT_TRUE(gate.claim(b, 4U));
 }
 
+void test_dequeued_record_preserves_actual_receive_age() {
+  struct Command {
+    bool fromHA = false;
+    std::uint32_t stopEpoch = 0;
+    std::uint32_t receivedAt = 0;
+    std::string payload;
+  };
+  Command slot{true, 7U, 120000U, "ticket45:0123456789abcdef"};
+  Command item;
+  takeQueuedCommand(item, slot); // same transfer as firmware dequeueCommand
+  TEST_ASSERT_TRUE(item.fromHA);
+  TEST_ASSERT_EQUAL_UINT32(7U, item.stopEpoch);
+  TEST_ASSERT_EQUAL_UINT32(120000U, item.receivedAt);
+  TEST_ASSERT_EQUAL_STRING("ticket45:0123456789abcdef", item.payload.c_str());
+  TEST_ASSERT_TRUE(slot.payload.empty());
+  TEST_ASSERT_TRUE(queueFresh(124999U, item.receivedAt, item.stopEpoch, 7U));
+  TEST_ASSERT_FALSE(queueFresh(125000U, item.receivedAt, item.stopEpoch, 7U));
+  TEST_ASSERT_FALSE(queueFresh(120001U, item.receivedAt, item.stopEpoch, 8U));
+  slot = Command{false, 8U, 0xfffffff0U, "statuss"};
+  takeQueuedCommand(item, slot);
+  TEST_ASSERT_FALSE(item.fromHA);
+  TEST_ASSERT_EQUAL_STRING("statuss", item.payload.c_str());
+  TEST_ASSERT_TRUE(queueFresh(0xfffffff0U + 4999U, item.receivedAt, item.stopEpoch, 8U));
+  TEST_ASSERT_FALSE(queueFresh(0xfffffff0U + 5000U, item.receivedAt, item.stopEpoch, 8U));
+}
+
+void test_recent_request_does_not_refresh_or_resurrect_ticket() {
+  RecentRequests recent;
+  TicketGate gate;
+  constexpr char first[] = "0123456789abcdef";
+  constexpr char second[] = "fedcba9876543210";
+  TEST_ASSERT_TRUE(recent.admit(first));
+  TEST_ASSERT_TRUE(gate.issue(a, 100U));
+  TEST_ASSERT_FALSE(recent.admit(first));
+  TEST_ASSERT_TRUE(gate.claim(a, 10099U));
+  TEST_ASSERT_EQUAL_UINT32(35001U, gate.remainingMs(10099U));
+  gate.invalidate(); // STOP, session loss, failed start, or cancellation
+  TEST_ASSERT_FALSE(recent.admit(first));
+  TEST_ASSERT_FALSE(gate.claim(a, 10100U));
+  TEST_ASSERT_TRUE(recent.admit(second));
+  TEST_ASSERT_TRUE(gate.issue(b, 10200U));
+  TEST_ASSERT_FALSE(recent.admit(first)); // non-consecutive redelivery
+  TEST_ASSERT_FALSE(recent.admit(second));
+  gate.expire(20200U);
+  TEST_ASSERT_FALSE(recent.admit(second));
+  TEST_ASSERT_FALSE(gate.claim(b, 20201U));
+  // Even an admitted request that never produces an offer cannot be retried.
+  TEST_ASSERT_TRUE(recent.admit("0000000000000001"));
+  TEST_ASSERT_FALSE(recent.admit("0000000000000001"));
+}
+
+void test_request_history_has_explicit_bounded_lifetime() {
+  RecentRequests recent;
+  TEST_ASSERT_FALSE(recent.admit(nullptr));
+  TEST_ASSERT_FALSE(recent.admit(""));
+  TEST_ASSERT_FALSE(recent.admit("0123456789abcdeF"));
+  TEST_ASSERT_FALSE(recent.admit("0123456789abcdef0"));
+  constexpr char first[] = "0123456789abcdef";
+  TEST_ASSERT_TRUE(recent.admit(first));
+  for (std::size_t i = 1U; i < RecentRequests::kCapacity; ++i) {
+    char id[kRequestChars + 1U] = {};
+    std::snprintf(id, sizeof(id), "%016lx", static_cast<unsigned long>(i));
+    TEST_ASSERT_TRUE(recent.admit(id));
+    TEST_ASSERT_FALSE(recent.admit(first));
+  }
+  TEST_ASSERT_TRUE(recent.admit("ffffffffffffffff")); // evicts oldest
+  TEST_ASSERT_TRUE(recent.admit(first)); // not global replay protection
+  RecentRequests rebooted;
+  TEST_ASSERT_TRUE(rebooted.admit(first)); // RAM history only
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_default_disabled_and_strict_wire);
@@ -99,5 +172,8 @@ int main() {
   RUN_TEST(test_stop_reconnect_ota_or_failed_start_invalidate);
   RUN_TEST(test_expiry_and_wrap);
   RUN_TEST(test_queued_stop_epoch_age_and_replacement);
+  RUN_TEST(test_dequeued_record_preserves_actual_receive_age);
+  RUN_TEST(test_recent_request_does_not_refresh_or_resurrect_ticket);
+  RUN_TEST(test_request_history_has_explicit_bounded_lifetime);
   return UNITY_END();
 }
