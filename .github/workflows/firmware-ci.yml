@@ -227,7 +227,13 @@ jobs:
           test -z "$(git status --porcelain)"
           export PLATFORMIO_CORE_DIR="${RUNNER_TEMP}/ha-cutoff-platformio"
           test ! -e "${PLATFORMIO_CORE_DIR}"
+          # Pinned platform 55.03.311 uses SCons 4.8.1. Its internal penv
+          # otherwise resolves pioarduino>=6.1.19 to 6.2.x (upstream #529/#556).
+          # Constrain the nested uv installer too, not only the outer CLI.
+          export UV_CONSTRAINT="${RUNNER_TEMP}/ha-cutoff-constraints.txt"
+          printf '%s\n' 'pioarduino==6.1.19' > "${UV_CONSTRAINT}"
           pio run -e esp32_ha_bounded_candidate 2>&1 | tee "${RUNNER_TEMP}/ha-cutoff-build.log"
+          "${PLATFORMIO_CORE_DIR}/penv/bin/python" -c 'from importlib.metadata import version; v = version("pioarduino"); assert v == "6.1.19", v; print("HA_CUTOFF_CHILD_CORE=" + v)'
           python scripts/check_ha_cutoff_contract.py \
             --build-log "${RUNNER_TEMP}/ha-cutoff-build.log" \
             --elf .pio/build/esp32_ha_bounded_candidate/firmware.elf \
