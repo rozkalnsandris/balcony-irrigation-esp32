@@ -60,9 +60,18 @@ def build_contract(log_path, elf_path, packages):
     require(elf_path.is_file(), "candidate ELF missing")
     support = flags.pop()
     print("HA_CUTOFF_ACTUAL_SDK_CACHE_SAFE=" + support)
-    if support == "NO":
-        print("HA_CUTOFF_LINK_PROOF=INHIBITED_UNSUPPORTED_SDK")
-        return
+    require(support == "YES", "candidate SDK still lacks cache-safe GPTimer")
+    require("*** Copied compiled esp32 IDF libraries to Arduino framework ***" in log,
+            "fresh HybridCompile library rebuild not observed")
+    configs = sorted((packages / "framework-arduinoespressif32-libs" / "esp32").glob(
+        "*/include/sdkconfig.h"))
+    require(bool(configs), "rebuilt SDK configuration header missing")
+    keys = ("CONFIG_GPTIMER_ISR_CACHE_SAFE", "CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM")
+    enabled = [path for path in configs if all(
+        re.search(r"^#define\s+" + key + r"\s+1\s*$",
+                  path.read_text(encoding="utf-8"), re.MULTILINE) for key in keys)]
+    require(bool(enabled), "rebuilt SDK headers lack required options")
+    print("HA_CUTOFF_REBUILT_SDK_HEADERS=PASS")
     binaries = sorted((packages / "toolchain-xtensa-esp-elf" / "bin").glob(
         "xtensa*elf-objdump"))
     require(bool(binaries), "objdump unavailable")
