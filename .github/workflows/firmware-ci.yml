@@ -202,7 +202,14 @@ jobs:
         run: pio run -e esp32_ci
 
       - name: Build opt-in bounded HA firmware candidate (build only)
-        run: pio run -e esp32_ha_bounded_candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          pio run -e esp32_ha_bounded_candidate 2>&1 | tee "${RUNNER_TEMP}/ha-cutoff-build.log"
+          python scripts/check_ha_cutoff_contract.py \
+            --build-log "${RUNNER_TEMP}/ha-cutoff-build.log" \
+            --elf .pio/build/esp32_ha_bounded_candidate/firmware.elf \
+            --packages-root "${HOME}/.platformio/packages"
 
       - name: Run bounded Cppcheck analysis
         run: pio check -e esp32_check --fail-on-defect=high
