@@ -20,6 +20,7 @@
 #include "pump_timing_policy.h"
 #include "ha_bounded_watering_policy.h"
 #include "ha_fresh_offer_policy.h"
+#include "ha_cutoff_runtime.h"
 #include "esp_random.h"
 #include "sensor_enable_policy.h"
 
@@ -187,6 +188,21 @@ bool watchdogSubscribed = false;
 // ============================================================
 
 bool pumpRunning = false;
+#if BALCONY_HA_BOUNDED_PROTOCOL
+static_assert(RELAY_PIN == ha_cutoff::Guard::kRelayPin &&
+              RELAY_ON == LOW && RELAY_OFF == HIGH,
+              "candidate cutoff requires the reviewed active-low relay pin");
+DRAM_ATTR ha_cutoff::Guard boundedCutoff;
+#endif
+
+// Every candidate OFF path serializes the GPIO write with the alarm and ON.
+void pumpRelayOff() {
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  boundedCutoff.off();
+#else
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+#endif
+}
 ha_bounded_watering::TicketGate boundedGate;
 ha_bounded_watering::RecentRequests boundedRecentRequests;
 char boundedActiveToken[ha_bounded_watering::kTokenChars + 1U] = {};
@@ -693,7 +709,7 @@ bool publishPumpStatus() {
 }
 
 bool boundedNetworkReady() {
-  return mqttSessionReady() && mqtt.isConnected() &&
+  return watchdogSubscribed && mqttSessionReady() && mqtt.isConnected() &&
          WiFi.status() == WL_CONNECTED && !otaTransferStarted &&
          !urgentPumpStopPending && mqtt.queueSize() == 0U &&
          !mqtt.trackedPublishBusy();
@@ -707,6 +723,9 @@ bool publishBoundedReply(const char* reply) {
 }
 
 bool startPump(uint32_t seconds) {
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  if (!boundedCutoff.ready()) return false;
+#endif
   if (ha_bounded_watering::kEnabled &&
       (seconds != ha_bounded_watering::kCycleSeconds ||
        !boundedGate.claimFresh(millis()) || !boundedNetworkReady())) {
@@ -782,23 +801,33 @@ bool startPump(uint32_t seconds) {
     return false;
   }
 
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  // Sample the free-running hardware count BEFORE the remaining budget.
+  // Any delay between these reads shortens the alarm, never extends it.
+  uint64_t cutoffCount = 0;
+  if (!boundedCutoff.sampleCount(cutoffCount)) return false;
+#endif
   uint32_t now = millis();
   uint32_t plannedMs = seconds * 1000UL;
-  if (ha_bounded_watering::kEnabled) {
-    plannedMs = boundedGate.remainingMs(now);
-    if (plannedMs == 0U || !boundedNetworkReady()) {
-      boundedGate.invalidate();
-      return false;
-    }
-    std::memcpy(boundedActiveToken, boundedGate.token(),
-                sizeof(boundedActiveToken));
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  plannedMs = boundedGate.remainingMs(now);
+  if (plannedMs == 0U || !boundedNetworkReady() ||
+      !boundedCutoff.arm(cutoffCount, plannedMs, now) ||
+      !boundedGate.claimFresh(millis()) || !boundedNetworkReady() ||
+      !boundedCutoff.start()) {
+    boundedCutoff.off();
     boundedGate.invalidate();
+    return false;
   }
-
+  std::memcpy(boundedActiveToken, boundedGate.token(),
+              sizeof(boundedActiveToken));
+  boundedGate.invalidate();
+#else
   digitalWrite(
     RELAY_PIN,
     RELAY_ON
   );
+#endif
 
   pumpRunning = true;
 
@@ -862,10 +891,7 @@ void stopPump(
 
   // Fiziski izslēdzam releju vienmēr,
   // pat ja programmatūra domā, ka sūknis jau OFF.
-  digitalWrite(
-    RELAY_PIN,
-    RELAY_OFF
-  );
+  pumpRelayOff();
 
   if (pumpRunning) {
 
@@ -911,6 +937,14 @@ void stopPump(
 }
 
 void servicePump() {
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  if (boundedCutoff.needsReconciliation()) {
+    // The ISR already wrote GPIO OFF. Main task alone updates state/ACK.
+    if (pumpRunning) stopPump("bounded hardware cutoff");
+    boundedGate.invalidate();
+    if (boundedCutoff.reconcile()) ++pumpStopEpoch;
+  }
+#endif
 
   if (ha_bounded_watering::kEnabled) boundedGate.expire(millis());
   if (!pumpRunning) {
@@ -973,10 +1007,7 @@ void requestUrgentPumpStop(bool fromHA) {
   // Drošības efekts notiek uzreiz callback kontekstā: tikai GPIO OFF.
   // MQTT publish/logging šeit apzināti neveicam, lai neizraisītu
   // MQTT callback re-entrancy.
-  digitalWrite(
-    RELAY_PIN,
-    RELAY_OFF
-  );
+  pumpRelayOff();
 
   pumpStopEpoch++;
   if (ha_bounded_watering::kEnabled) boundedGate.invalidate();
@@ -1008,10 +1039,7 @@ void serviceUrgentPumpStop() {
 
   // Pat ja programmatūras stāvoklis jau bija OFF, uzturam fizisko
   // fail-safe stāvokli un atjaunojam retained MQTT statusu.
-  digitalWrite(
-    RELAY_PIN,
-    RELAY_OFF
-  );
+  pumpRelayOff();
 
   publishPumpStatus();
 
@@ -1041,10 +1069,7 @@ void servicePumpCriticalNetworkInput() {
 // ============================================================
 
 void forcePumpOffForOtaSafety() {
-  digitalWrite(
-    RELAY_PIN,
-    RELAY_OFF
-  );
+  pumpRelayOff();
 
   // Jebkurš OTA lifecycle/error notikums ir jaunāks fail-safe OFF punkts.
   // Tas arī padara iepriekš rindā esošus pump-start pieprasījumus stale.
@@ -2854,6 +2879,9 @@ bool collectFreshOfferScan(ha_fresh_offer::Scan& scan, uint32_t started,
 
 // Only called in the main loop, never from the MQTT callback.
 void processBoundedCommand(const PendingCommand& item) {
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  if (!boundedCutoff.ready()) return;
+#endif
   using namespace ha_bounded_watering;
   if (!queueFresh(millis(), item.receivedAt, item.stopEpoch, pumpStopEpoch) ||
       pumpRunning || !boundedNetworkReady()) return;
@@ -2905,6 +2933,12 @@ void processBoundedCommand(const PendingCommand& item) {
   serviceUrgentPumpStop();
   servicePump();
   if (!pumpRunning || urgentPumpStopPending) return;
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  if (!boundedCutoff.running()) {
+    servicePump();
+    return;
+  }
+#endif
   char reply[32] = {};
   snprintf(reply, sizeof(reply), "on:%s", boundedActiveToken);
   if (!publishBoundedReply(reply)) {
@@ -3001,6 +3035,11 @@ void processCommandQueue() {
 // ============================================================
 
 void setup() {
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  ha_cutoff::Guard::preloadOff();
+  pinMode(RELAY_PIN, OUTPUT);
+  pumpRelayOff();
+#endif
 
   Serial.begin(
     115200
@@ -3017,10 +3056,12 @@ void setup() {
     OUTPUT
   );
 
-  digitalWrite(
-    RELAY_PIN,
-    RELAY_OFF
-  );
+  pumpRelayOff();
+#if BALCONY_HA_BOUNDED_PROTOCOL
+  if (!boundedCutoff.begin()) {
+    Serial.println("HA_CUTOFF_UNAVAILABLE: candidate starts inhibited");
+  }
+#endif
 
   // Saglabājam informāciju par iepriekšējo restartu,
   // bet uzreiz notīrām RTC flagu, jo sūknis jau ir OFF.
