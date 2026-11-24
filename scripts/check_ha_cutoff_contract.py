@@ -2,6 +2,7 @@
 """Check candidate cutoff wiring and report actual build support (never run firmware)."""
 
 import argparse
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -69,7 +70,10 @@ def build_contract(log_path, elf_path, packages):
     configs = sorted((packages / "framework-arduinoespressif32-libs" / "esp32").glob(
         "*/include/sdkconfig.h"))
     require(bool(configs), "rebuilt SDK configuration header missing")
-    keys = ("CONFIG_GPTIMER_ISR_CACHE_SAFE", "CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM")
+    # The pinned IDF Kconfig selects OBJ_CACHE_SAFE via HANDLER_IN_IRAM.
+    # The driver uses this option for internal-memory group allocation.
+    keys = ("CONFIG_GPTIMER_ISR_CACHE_SAFE", "CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM",
+            "CONFIG_GPTIMER_OBJ_CACHE_SAFE")
     enabled = [path for path in configs if all(
         re.search(r"^#define\s+" + key + r"\s+1\s*$",
                   path.read_text(encoding="utf-8"), re.MULTILINE) for key in keys)]
@@ -90,7 +94,37 @@ def build_contract(log_path, elf_path, packages):
     section("ha_cutoff::Guard::onAlarm(", ".iram")
     section("gptimer_default_isr", ".iram")
     section("boundedCutoff", ".dram")
-    print("HA_CUTOFF_LINK_PROOF=ENTRY_AND_DATA_PLACEMENT_ONLY")
+
+    # Pinned ESP-IDF 5.5.5 gptimer_default_isr calls the HAL capture
+    # helper and the FreeRTOS critical section pair before our callback.
+    # Check exact C symbols, not substring matches (e.g. Compliance).
+    raw_symbols = subprocess.check_output([str(binaries[0]), "-t", str(elf_path)],
+                                          text=True)
+    helpers = ("timer_hal_capture_and_get_counter_value",
+               "xPortEnterCriticalTimeout", "vPortExitCritical")
+    for name in helpers:
+        rows = [line.split() for line in raw_symbols.splitlines()
+                if line.split() and line.split()[-1] == name]
+        require(len(rows) == 1 and any(
+            field.startswith(".iram") for field in rows[0][1:-1]),
+            "missing or misplaced ISR helper: " + name)
+        print("HA_CUTOFF_LINK_HELPER=" + name + ":IRAM")
+
+    # Record focused machine-code evidence for review of direct calls, literal
+    # loads, the driver's indirect callback and critical-section internals.
+    # A human still has to resolve targets/data and the interrupt entry path.
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    print("HA_CUTOFF_ELF_SOURCE_REV=" + revision)
+    print("HA_CUTOFF_ELF_SHA256=" + hashlib.sha256(elf_path.read_bytes()).hexdigest())
+    callback = "_ZN9ha_cutoff5Guard7onAlarmEP9gptimer_tPK26gptimer_alarm_event_data_tPv"
+    for name in (callback, "gptimer_default_isr", *helpers):
+        disassembly = subprocess.check_output(
+            [str(binaries[0]), "-d", "--disassemble=" + name, str(elf_path)], text=True)
+        require("<" + name + ">:" in disassembly, "missing ISR disassembly: " + name)
+        print("HA_CUTOFF_DISASSEMBLY_BEGIN=" + name)
+        print(disassembly.rstrip())
+        print("HA_CUTOFF_DISASSEMBLY_END=" + name)
+    print("HA_CUTOFF_LINK_PROOF=SELECTED_HELPER_AND_ENTRY_DATA_PLACEMENT_ONLY")
 
 
 if __name__ == "__main__":
