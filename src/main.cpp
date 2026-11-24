@@ -18,6 +18,8 @@
 #include "network_reconnect_policy.h"
 #include "ota_error_policy.h"
 #include "pump_timing_policy.h"
+#include "ha_bounded_watering_policy.h"
+#include "esp_random.h"
 #include "sensor_enable_policy.h"
 
 #ifndef FIRMWARE_GIT_REV
@@ -39,6 +41,7 @@ constexpr char MQTT_CLIENT_ID_BASE[] = "balkons_esp32";
 constexpr char T_STATUS[]   = "balkons/status";
 constexpr char T_PUMP_CMD[] = "balkons/sukna/komanda";
 constexpr char T_PUMP_ST[]  = "balkons/sukna/stends";
+constexpr char T_HA45_REPLY[] = "balkons/ha45/reply";
 constexpr char T_LOG[]      = "balkons/log";
 constexpr char T_CMD[]      = "balkons/cmd";
 constexpr char T_OUT[]      = "balkons/telegram_out";
@@ -183,6 +186,10 @@ bool watchdogSubscribed = false;
 // ============================================================
 
 bool pumpRunning = false;
+ha_bounded_watering::TicketGate boundedGate;
+char boundedActiveToken[ha_bounded_watering::kTokenChars + 1U] = {};
+uint32_t boundedBootNonce[2] = {};
+uint32_t boundedTicketSequence = 0U;
 
 // Absolūtais viena laistīšanas seansa sākums.
 uint32_t pumpSessionStartMs = 0;
@@ -210,6 +217,7 @@ constexpr uint8_t COMMAND_QUEUE_SIZE = 8;
 struct PendingCommand {
   bool fromHA = false;
   uint32_t stopEpoch = 0;
+  uint32_t receivedAt = 0;
   String payload;
 };
 
@@ -682,7 +690,26 @@ bool publishPumpStatus() {
   return publishPumpStatusValue(pumpRunning);
 }
 
+bool boundedNetworkReady() {
+  return mqttSessionReady() && mqtt.isConnected() &&
+         WiFi.status() == WL_CONNECTED && !otaTransferStarted &&
+         !urgentPumpStopPending && mqtt.queueSize() == 0U &&
+         !mqtt.trackedPublishBusy();
+}
+
+// Queue only, never call a nested MQTT loop while the relay is energized.
+bool publishBoundedReply(const char* reply) {
+  return mqttSessionReady() && mqtt.isConnected() &&
+         mqtt_runtime_policy::canQueueBestEffort(mqtt.queueSize()) &&
+         mqtt.publishMessage(T_HA45_REPLY, reply, 0U, false);
+}
+
 bool startPump(uint32_t seconds) {
+  if (ha_bounded_watering::kEnabled &&
+      (seconds != ha_bounded_watering::kCycleSeconds ||
+       !boundedGate.claimFresh(millis()) || !boundedNetworkReady())) {
+    return false;
+  }
 
   // Ja STOP/OFF tikko saņemts, vispirms jāpabeidz tā stāvokļa
   // reconciliācija. Tas nepieļauj pump startu vienā un tajā pašā
@@ -754,6 +781,17 @@ bool startPump(uint32_t seconds) {
   }
 
   uint32_t now = millis();
+  uint32_t plannedMs = seconds * 1000UL;
+  if (ha_bounded_watering::kEnabled) {
+    plannedMs = boundedGate.remainingMs(now);
+    if (plannedMs == 0U || !boundedNetworkReady()) {
+      boundedGate.invalidate();
+      return false;
+    }
+    std::memcpy(boundedActiveToken, boundedGate.token(),
+                sizeof(boundedActiveToken));
+    boundedGate.invalidate();
+  }
 
   digitalWrite(
     RELAY_PIN,
@@ -764,8 +802,7 @@ bool startPump(uint32_t seconds) {
 
   pumpSessionStartMs = now;
 
-  pumpPlannedDurationMs =
-      seconds * 1000UL;
+  pumpPlannedDurationMs = plannedMs;
 
   totalWaterings++;
 
@@ -784,6 +821,7 @@ bool startPump(uint32_t seconds) {
 }
 
 uint32_t extendPump(uint32_t additionalSeconds) {
+  if (ha_bounded_watering::kEnabled) return 0U;
 
   if (!pumpRunning) {
     return 0;
@@ -848,17 +886,38 @@ void stopPump(
 
   rtcPumpWasRunning = false;
 
+  char completedToken[sizeof(boundedActiveToken)] = {};
+  if (ha_bounded_watering::kEnabled) {
+    boundedGate.invalidate();
+    ++pumpStopEpoch;
+    std::memcpy(completedToken, boundedActiveToken, sizeof(completedToken));
+    boundedActiveToken[0] = '\0';
+  }
+
   logEvent(
     "Sūknis IZSLĒGTS — " +
     reason
   );
 
   publishPumpStatus();
+  if (ha_bounded_watering::kEnabled && completedToken[0] != '\0') {
+    char reply[32] = {};
+    snprintf(reply, sizeof(reply), "off:%s", completedToken);
+    // Loss of this best-effort receipt is ambiguous to HA, not permission to retry.
+    publishBoundedReply(reply);
+  }
 }
 
 void servicePump() {
 
+  if (ha_bounded_watering::kEnabled) boundedGate.expire(millis());
   if (!pumpRunning) {
+    return;
+  }
+  if (ha_bounded_watering::kEnabled &&
+      (!mqttSessionReady() || !mqtt.isConnected() ||
+       WiFi.status() != WL_CONNECTED || otaTransferStarted)) {
+    stopPump("bounded session connection lost");
     return;
   }
 
@@ -918,6 +977,7 @@ void requestUrgentPumpStop(bool fromHA) {
   );
 
   pumpStopEpoch++;
+  if (ha_bounded_watering::kEnabled) boundedGate.invalidate();
   urgentPumpStopPending = true;
   urgentPumpStopFromHA = fromHA;
 }
@@ -987,6 +1047,10 @@ void forcePumpOffForOtaSafety() {
   // Jebkurš OTA lifecycle/error notikums ir jaunāks fail-safe OFF punkts.
   // Tas arī padara iepriekš rindā esošus pump-start pieprasījumus stale.
   pumpStopEpoch++;
+  if (ha_bounded_watering::kEnabled) {
+    boundedGate.invalidate();
+    boundedActiveToken[0] = '\0';
+  }
   pumpRunning = false;
   pumpPlannedDurationMs = 0;
   rtcPumpWasRunning = false;
@@ -1405,6 +1469,7 @@ void enqueueCommand(
   commandQueue[
     commandQueueTail
   ].stopEpoch = pumpStopEpoch;
+  commandQueue[commandQueueTail].receivedAt = millis();
 
   commandQueue[
     commandQueueTail
@@ -1562,6 +1627,10 @@ void resetMqttSessionInit() {
 
 void mqttConnectedHandler(bool sessionPresent) {
   (void)sessionPresent;
+  if (ha_bounded_watering::kEnabled) {
+    boundedGate.invalidate();
+    ++pumpStopEpoch;
+  }
 
   mqtt.resetTrackedSubscription();
   mqttDiscoverySensorIndex = 0;
@@ -1572,6 +1641,11 @@ void mqttConnectedHandler(bool sessionPresent) {
 
 void mqttDisconnectedHandler(espMqttClientTypes::DisconnectReason reason) {
   (void)reason;
+  if (ha_bounded_watering::kEnabled) {
+    boundedGate.invalidate();
+    ++pumpStopEpoch;
+    if (pumpRunning) requestUrgentPumpStop(true);
+  }
   resetMqttSessionInit();
 }
 
@@ -1890,6 +1964,7 @@ void mqttMessageHandler(
   }
   command[length] = '\0';
 
+  const std::size_t originalLength = length;
   trimCommandBuffer(command, length);
 
   // Urgent STOP/OFF tiek pārbaudīts uz fixed buffer pirms dinamiska String.
@@ -1903,6 +1978,12 @@ void mqttMessageHandler(
     return;
   }
 
+  if (ha_bounded_watering::kEnabled) {
+    if (fromHA && (originalLength != length ||
+        ha_bounded_watering::decode(true, metadata.retained, command, length) ==
+            ha_bounded_watering::Kind::invalid)) return;
+    if (!fromHA && command_safety::isPumpStartCommand(false, command)) return;
+  }
   String message(command);
   enqueueCommand(fromHA, message);
 }
@@ -2763,6 +2844,51 @@ void processCommand(
   }
 }
 
+// Only called in the main loop, never from the MQTT callback.
+void processBoundedCommand(const PendingCommand& item) {
+  using namespace ha_bounded_watering;
+  if (!queueFresh(millis(), item.receivedAt, item.stopEpoch, pumpStopEpoch) ||
+      pumpRunning || !boundedNetworkReady()) return;
+  const char* payload = item.payload.c_str();
+  const Kind kind = decode(item.fromHA, false, payload, item.payload.length());
+  if (kind == Kind::ticket) {
+    // Wi-Fi is active: ESP32 hardware RNG has its RF entropy source.
+    // A per-boot 64-bit nonce + nonwrapping counter prevents within-boot reuse.
+    if (boundedTicketSequence == 0U) {
+      esp_fill_random(boundedBootNonce, sizeof(boundedBootNonce));
+      if (boundedBootNonce[0] == 0U && boundedBootNonce[1] == 0U) return;
+    }
+    if (boundedTicketSequence == UINT32_MAX) return;
+    ++boundedTicketSequence;
+    char token[kTokenChars + 1U] = {};
+    snprintf(token, sizeof(token), "%08lx%08lx%08lx",
+             static_cast<unsigned long>(boundedBootNonce[0]),
+             static_cast<unsigned long>(boundedBootNonce[1]),
+             static_cast<unsigned long>(boundedTicketSequence));
+    if (!boundedGate.issue(token, millis())) return;
+    char reply[64] = {};
+    snprintf(reply, sizeof(reply), "offer:%s:%s", payload + 9U, token);
+    if (!publishBoundedReply(reply)) boundedGate.invalidate();
+    return;
+  }
+  if (kind != Kind::start || !boundedGate.claim(payload + 8U, millis())) return;
+  const bool started = startPump(kCycleSeconds);
+  boundedGate.invalidate();
+  if (!started) {
+    // A pre-relay software ON may have been published; reconcile OFF if possible.
+    if (!pumpRunning) publishPumpStatus();
+    return;
+  }
+  serviceUrgentPumpStop();
+  servicePump();
+  if (!pumpRunning || urgentPumpStopPending) return;
+  char reply[32] = {};
+  snprintf(reply, sizeof(reply), "on:%s", boundedActiveToken);
+  if (!publishBoundedReply(reply)) {
+    stopPump("bounded start acknowledgement enqueue failed");
+  }
+}
+
 void processCommandQueue() {
 
   if (commandQueueCount == 0) {
@@ -2775,6 +2901,13 @@ void processCommandQueue() {
   const bool mqttReady =
       mqttSessionReady() &&
       mqtt.isConnected();
+
+  if (ha_bounded_watering::kEnabled && head.fromHA && mqttReady &&
+      ha_bounded_watering::queueFresh(millis(), head.receivedAt,
+                                     head.stopEpoch, pumpStopEpoch) &&
+      !pumpRunning && (mqtt.queueSize() != 0U || mqtt.trackedPublishBusy())) {
+    return;
+  }
 
   // QoS1 command delivery can leave PUBACK work in the local outbox after
   // callback return. Keep pump-start at the FIFO head until that protocol
@@ -2802,6 +2935,11 @@ void processCommandQueue() {
         item
       )
   ) {
+    return;
+  }
+
+  if (ha_bounded_watering::kEnabled && item.fromHA) {
+    processBoundedCommand(item);
     return;
   }
 
