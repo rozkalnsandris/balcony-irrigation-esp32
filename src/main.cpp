@@ -188,6 +188,7 @@ bool watchdogSubscribed = false;
 
 bool pumpRunning = false;
 ha_bounded_watering::TicketGate boundedGate;
+ha_bounded_watering::RecentRequests boundedRecentRequests;
 char boundedActiveToken[ha_bounded_watering::kTokenChars + 1U] = {};
 uint32_t boundedBootNonce[2] = {};
 uint32_t boundedTicketSequence = 0U;
@@ -1493,24 +1494,7 @@ bool dequeueCommand(
     return false;
   }
 
-  out.fromHA =
-      commandQueue[
-        commandQueueHead
-      ].fromHA;
-
-  out.stopEpoch =
-      commandQueue[
-        commandQueueHead
-      ].stopEpoch;
-
-  out.payload =
-      commandQueue[
-        commandQueueHead
-      ].payload;
-
-  commandQueue[
-    commandQueueHead
-  ].payload = "";
+  ha_bounded_watering::takeQueuedCommand(out, commandQueue[commandQueueHead]);
 
   commandQueueHead =
       (commandQueueHead + 1) %
@@ -2876,6 +2860,9 @@ void processBoundedCommand(const PendingCommand& item) {
   const char* payload = item.payload.c_str();
   const Kind kind = decode(item.fromHA, false, payload, item.payload.length());
   if (kind == Kind::ticket) {
+    // Ignore recent duplicate requests before touching any existing ticket.
+    // Remember the ID even if this scan fails or is canceled by STOP.
+    if (!boundedRecentRequests.admit(payload + 9U)) return;
     // Revoke any preceding offer before measurement, even on scan failure.
     boundedGate.invalidate();
     const uint32_t scanStarted = millis();
